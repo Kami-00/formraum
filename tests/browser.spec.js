@@ -78,10 +78,10 @@ test('select a face in the viewport, sketch, extrude and preserve the model on i
   await page.locator('[data-tool="sketch"]').click();
   await page.locator('[data-sketch="width"]').fill('10');await page.locator('[data-sketch="height"]').fill('10');await page.locator('[data-sketch="depth"]').fill('8');
   await page.locator('[data-action="extrude"]').click();await expect(page.locator('#feature-list [data-feature="0"]')).toContainText('Aufbauen');
-  const original=await page.evaluate(()=>localStorage.getItem('formraum.project.v1'));
+  const original=await page.evaluate(()=>localStorage.getItem('formraum.project.library.'+localStorage.getItem('formraum.active-project')));
   await page.locator('[data-field="width"]').fill('-2');await page.locator('[data-action="apply-dimensions"]').click();
   await expect(page.locator('#toast')).toContainText('Breite');
-  expect(await page.evaluate(()=>localStorage.getItem('formraum.project.v1'))).toBe(original);
+  expect(await page.evaluate(()=>localStorage.getItem('formraum.project.library.'+localStorage.getItem('formraum.active-project')))).toBe(original);
 });
 
 test('FreeCAD STEP fixture and a multi-solid STEP assembly import',async({page})=>{

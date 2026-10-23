@@ -1,3 +1,5 @@
+import {ProjectStore,PROJECT_PREFIX} from './project-store.js';
+import {setupSession} from './session.js';
 import {calculate} from './cad-client.js';
 import * as THREE from './vendor/three.module.js';
 import {OrbitControls} from './vendor/OrbitControls.js';
@@ -10,7 +12,8 @@ const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const fmt = (n,d=2) => new Intl.NumberFormat('de-DE',{maximumFractionDigits:d}).format(n);
 const vec = a => new THREE.Vector3(...a);
 const uid = () => crypto.randomUUID();
-const STORAGE='formraum.project.v1';
+const library=new ProjectStore();
+let activeProjectId=null,projectRevision=0,lastCommitError='',sessionReady=false;
 const makeDefault = () => ({version:1,name:'Mein Bauteil',objects:[{id:uid(),name:'Quader 01',kind:'box',params:{width:40,depth:30,height:12},position:[0,0,0],features:[],color:'#67aba9'}]});
 let project=makeDefault(), models=[], selectedId=project.objects[0].id, selectedFace=null, selectedEdges=new Set(), selectedFeature=-1;
 let tool='select', sketch=null, busy=false, undoStack=[], redoStack=[], hoverEdge=null, drag=null, requestVersion=0, toastTimer, edgeSize=1;
@@ -113,25 +116,46 @@ function currentModel(){return models.find(o=>o.id===selectedId);}
 function toast(message,error=false){clearTimeout(toastTimer);const t=$('#toast');t.textContent=message;t.classList.toggle('error',error);t.hidden=false;toastTimer=setTimeout(()=>t.hidden=true,error?8500:3500);}
 function setBusy(value){busy=value;document.body.classList.toggle('busy',value);$('#busy-badge').hidden=!value;updateUndo();}
 function setStatus(message,ok=true){$('#status').textContent=message;$('#connection-dot').classList.toggle('off',!ok);}
-function persist(){
- try{localStorage.setItem(STORAGE,JSON.stringify(project));$('#autosave-status').textContent='Auf diesem Gerät gespeichert';}
- catch{$('#autosave-status').textContent='Zum Sichern bitte Projektdatei speichern';}
-}
 function updateUndo(){$('#undo').disabled=busy||!undoStack.length;$('#redo').disabled=busy||!redoStack.length;}
-async function commit(next,{record=true,fit=false,message=''}={}){
- if(busy)return false;
- setBusy(true);const n=++requestVersion;
+async function commit(next,{record=true,fit=false,message='',entry=null,create=false}={}){
+ if(busy){lastCommitError='Eine Berechnung läuft bereits.';return false;}
+ setBusy(true);const n=++requestVersion;lastCommitError='';
  try{
   const result=await calculate('model',{project:next});if(n!==requestVersion)return false;
-  if(record){undoStack.push(clone(project));if(undoStack.length>60)undoStack.shift();redoStack=[];}
+  const saved=entry||await library.save(create?uid():activeProjectId,result.project,create?0:projectRevision);
+  if(entry||create){undoStack=[];redoStack=[];}
+  else if(record){undoStack.push(clone(project));if(undoStack.length>60)undoStack.shift();redoStack=[];}
+  activeProjectId=saved.id;projectRevision=saved.revision;library.activate(saved.id);
   project=clone(result.project);models=result.objects;
   if(!project.objects.some(o=>o.id===selectedId))selectedId=project.objects[0]?.id||null;
   selectedFace=null;selectedEdges.clear();hoverEdge=null;selectedFeature=-1;
-  renderBodies();renderPanels();persist();setStatus(`${models.length} ${models.length===1?'Körper':'Körper'} · Geometrie bereit`);
+  renderBodies();renderPanels();renderProjectList();$('#autosave-status').textContent='Projekt im Browser gespeichert';
+  setStatus(`${models.length} Körper · Geometrie bereit`);
   if(fit)fitView();if(message)toast(message);return true;
- }catch(error){toast(error.message,true);setStatus('Änderung verworfen · letzter gültiger Stand erhalten',true);return false;}
+ }catch(error){lastCommitError=error.message;toast(error.message,true);setStatus('Änderung verworfen · letzter gültiger Stand erhalten',true);return false;}
  finally{setBusy(false);}
 }
+function renderProjectList(){
+ const root=$('#project-library');if(!root)return;
+ try{root.innerHTML=library.list().map(e=>`<div class="project-card ${e.id===activeProjectId?'current':''}"><button data-open-saved="${esc(e.id)}"><strong>${esc(e.name)}</strong><span>${e.bodies} Körper · ${esc(new Date(e.updatedAt).toLocaleString('de-DE'))}${e.id===activeProjectId?' · Aktiv':''}</span></button><button class="icon-button" data-duplicate-project="${esc(e.id)}" title="Projekt duplizieren" aria-label="${esc(e.name)} duplizieren">＋</button>${e.id!==activeProjectId?`<button class="icon-button" data-delete-project="${esc(e.id)}" title="Projekt löschen" aria-label="${esc(e.name)} löschen">×</button>`:''}</div>`).join('');}
+ catch(error){root.textContent=error.message;}
+}
+async function openSaved(id){
+ if(busy)return false;
+ try{const entry=library.read(id);if(!entry)throw new Error('Projekt nicht gefunden.');
+  if(sketch)cancelSketch();tool='select';
+  const ok=await commit(entry.project,{entry,record:false,fit:true,message:'Projekt geöffnet'});
+  if(ok)$('#projects-dialog').close();return ok;
+ }catch(error){lastCommitError=error.message;toast(error.message,true);return false;}
+}
+async function newProject(data={version:1,name:'Neues Bauteil',objects:[]}){
+ if(busy)return false;if(sketch)cancelSketch();tool='select';
+ const ok=await commit(data,{create:true,record:false,fit:true,message:'Projekt angelegt'});
+ if(ok)$('#projects-dialog').close();return ok;
+}
+window.addEventListener('storage',event=>{
+ if(event.key?.startsWith(PROJECT_PREFIX)){renderProjectList();if(event.key===PROJECT_PREFIX+activeProjectId)$('#autosave-status').textContent='In anderem Tab geändert · über Projekte neu öffnen';}
+});
 
 function field(label,key,value,unit='mm',extra=''){
  return `<label class="field"><span>${esc(label)}</span><div class="input-unit"><input type="number" data-field="${esc(key)}" value="${Number(value??0)}" step="0.1" ${extra} aria-label="${esc(label)}">${unit?`<em>${esc(unit)}</em>`:''}</div></label>`;
@@ -332,7 +356,7 @@ async function addBody(kind){
 }
 function download(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),20000);}
 function safeName(){return (project.name||'Bauteil').replace(/[^\p{L}\p{N} _-]/gu,'').trim().slice(0,70)||'Bauteil';}
-function saveProject(){project.name=$('#project-name').value.trim()||'Mein Bauteil';persist();download(new Blob([JSON.stringify(project,null,2)],{type:'application/json'}),safeName()+'.formraum.json');toast('Projektdatei gespeichert');}
+function saveProject(){download(new Blob([JSON.stringify(project,null,2)],{type:'application/json'}),safeName()+'.formraum.json');toast('Projektdatei gespeichert');}
 async function exportModel(kind){
  if(busy)return;setBusy(true);$('#export-menu').hidden=true;
  try{const blob=await calculate(kind==='step'?'export_step':'export_stl',{project});download(blob,safeName()+'.'+kind);toast(`${kind.toUpperCase()} exportiert`);}catch(e){toast(e.message,true);}finally{setBusy(false);}
@@ -346,8 +370,8 @@ async function openFile(file){
    if(busy)return;setBusy(true);
    const base64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]);r.onerror=reject;r.readAsDataURL(file);});
    const result=await calculate('import_step',{base64,filename:file.name});
-   setBusy(false);result.project.name=file.name.replace(/\.(step|stp)$/i,'');selectedId=result.project.objects[0]?.id;await commit(result.project,{fit:true,message:'STEP-Datei geöffnet'});
-  }else{const data=JSON.parse(await file.text());if(!Array.isArray(data.objects))throw new Error('Diese Datei ist kein Formraum-Projekt.');await commit(data,{fit:true,message:'Projekt geöffnet'});}
+   setBusy(false);result.project.name=file.name.replace(/\.(step|stp)$/i,'');selectedId=result.project.objects[0]?.id;await newProject(result.project);
+  }else{const data=JSON.parse(await file.text());if(!Array.isArray(data.objects))throw new Error('Diese Datei ist kein Formraum-Projekt.');await newProject(data);}
  }catch(e){setBusy(false);toast(e.message||'Datei konnte nicht geöffnet werden.',true);}
 }
 async function undo(){
@@ -362,11 +386,14 @@ async function redo(){
 document.addEventListener('click',async event=>{
  const button=event.target.closest('button');
  if(button?.disabled)return;
+ if(button?.dataset.openSaved){await openSaved(button.dataset.openSaved);return;}
+ if(button?.dataset.duplicateProject){const entry=library.read(button.dataset.duplicateProject);if(entry){entry.project.name=(entry.project.name||'Projekt')+' Kopie';await newProject(entry.project);}return;}
+ if(button?.dataset.deleteProject){const entry=library.read(button.dataset.deleteProject);if(entry&&entry.id!==activeProjectId&&confirm(`Projekt „${entry.project.name}“ aus dem Browser löschen?`)){try{await library.remove(entry.id,entry.revision);renderProjectList();}catch(e){toast(e.message,true);}}return;}
  if(button?.dataset.tool){setTool(button.dataset.tool);return;}
  if(button?.dataset.view){setView(button.dataset.view);return;}
  if(button?.dataset.export){exportModel(button.dataset.export);return;}
  if(button?.dataset.visibility){
-  const id=button.dataset.visibility,spec=project.objects.find(o=>o.id===id);spec.visible=spec.visible===false;renderBodies();renderPanels();persist();return;
+  const next=clone(project),spec=next.objects.find(o=>o.id===button.dataset.visibility);spec.visible=spec.visible===false;await commit(next);return;
  }
  const row=event.target.closest('[data-body]');if(row){if(sketch)cancelSketch();setTool('select');selectObject(row.dataset.body);return;}
  if(button?.dataset.removeFeature!==undefined){
@@ -404,17 +431,20 @@ $('#save-project').onclick=saveProject;$('#open-project').onclick=()=>$('#projec
 $('#project-file').accept='.json,.formraum,.step,.stp';
 $('#project-file').onchange=event=>{openFile(event.target.files[0]);event.target.value='';};
 $('#export-menu-button').onclick=()=>$('#export-menu').hidden=!$('#export-menu').hidden;
-$('#project-name').onchange=event=>{project.name=event.target.value.trim()||'Mein Bauteil';persist();};
-$('#new-project').onclick=async()=>{if(busy)return;if(sketch)cancelSketch();tool='select';selectedId=null;await commit({version:1,name:'Neues Bauteil',objects:[]},{fit:true,message:'Leeres Projekt angelegt · Strg Z zum Wiederherstellen'});};
+$('#project-name').onchange=async event=>{const next=clone(project);next.name=event.target.value.trim()||'Mein Bauteil';if(!await commit(next))$('#project-name').value=project.name;};
+$('#new-project').onclick=()=>newProject();
+$('#project-library-new').onclick=()=>newProject();
+$('#projects-button').onclick=()=>{renderProjectList();$('#projects-dialog').showModal();};
+$$('[data-close-dialog]').forEach(button=>button.onclick=()=>button.closest('dialog').close());
 $('#dismiss-welcome').onclick=()=>{$('#welcome').hidden=true;try{localStorage.setItem('formraum.welcome','dismissed');}catch{}};
 try{if(localStorage.getItem('formraum.welcome'))$('#welcome').hidden=true;}catch{}
-$('#help').onclick=()=>$('#help-dialog').showModal();$$('.close-dialog').forEach(b=>b.onclick=()=>$('#help-dialog').close());
+$('#help').onclick=()=>$('#help-dialog').showModal();$$('#help-dialog .close-dialog').forEach(b=>b.onclick=()=>$('#help-dialog').close());
 $('#help-dialog').addEventListener('click',event=>{if(event.target===$('#help-dialog'))$('#help-dialog').close();});
 document.addEventListener('keydown',event=>{
  if(event.key==='Escape'){if(sketch)cancelSketch();else setTool('select');$('#export-menu').hidden=true;return;}
  const editing=event.target.matches('input,textarea,select');
  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='s'){event.preventDefault();saveProject();return;}
- if(editing||$('#help-dialog').open)return;
+ if(editing||document.querySelector('dialog[open]'))return;
  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'){event.preventDefault();event.shiftKey?redo():undo();return;}
  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='y'){event.preventDefault();redo();return;}
  if(event.key.toLowerCase()==='f')fitView();
@@ -429,18 +459,51 @@ async function init(){
  renderPanels();resize();setBusy(true);setStatus('CAD-Kern wird im Browser geladen …');
  try{
   await calculate('ready');setBusy(false);
-  let initial=project;
-  try{const saved=JSON.parse(localStorage.getItem(STORAGE));if(saved?.version===1&&Array.isArray(saved.objects)){initial=saved;selectedId=saved.objects[0]?.id;}}catch{}
-  const ok=await commit(initial,{record:false,fit:true});
-  if(!ok&&initial!==project){toast('Gespeichertes Projekt konnte nicht geladen werden. Neues Bauteil geöffnet.',true);project=makeDefault();selectedId=project.objects[0].id;await commit(project,{record:false,fit:true});}
- }catch(error){setBusy(false);setStatus('CAD-Kern konnte nicht geladen werden · Seite neu laden',false);toast(error.message,true);}
+  const entry=await library.initial(project);
+  if(!await commit(entry.project,{entry,record:false,fit:true}))throw new Error(lastCommitError);
+  sessionReady=true;
+
+ }catch(error){setBusy(false);setStatus('Start fehlgeschlagen · gespeicherte Projekte bleiben erhalten',false);toast(error.message,true);}
 }
 init();
 
 // Offline caching is only enabled for the built application, never in development.
 if(import.meta.env.PROD&&'serviceWorker' in navigator){
- navigator.serviceWorker.register(new URL('./sw.js',window.location.href)).then(async()=>{
+ navigator.serviceWorker.register(new URL('./sw.js',window.location.href)).then(async registration=>{
+  const updateButton=$('#update-app');
+  const offerUpdate=()=>{if(registration.waiting)updateButton.hidden=false;};
+  offerUpdate();registration.addEventListener('updatefound',()=>registration.installing?.addEventListener('statechange',offerUpdate));
+  updateButton.onclick=()=>{
+   if(busy||sketch){toast('Bitte die laufende Bearbeitung zuerst beenden.');return;}
+   navigator.serviceWorker.addEventListener('controllerchange',()=>location.reload(),{once:true});
+   registration.waiting?.postMessage('ACTIVATE_UPDATE');
+  };
   await navigator.serviceWorker.ready;
   const badge=$('.local-badge');if(badge)badge.title='Vollständig geladen · auch offline verfügbar';
  }).catch(()=>{const badge=$('.local-badge');if(badge)badge.title='Offline-Speicherung nicht verfügbar; die Anwendung funktioniert online.';});
 }
+
+function sessionState(){
+ return {projectId:activeProjectId,revision:projectRevision,project:clone(project),selection:{bodyId:selectedId,face:selectedFace,edges:[...selectedEdges]},geometry:models.map(({mesh,...model})=>model)};
+}
+setupSession({
+ list:()=>library.list(),
+ state:()=>{if(!sessionReady)throw new Error('Anwendung noch nicht bereit.');return sessionState();},
+ async action(method,args){
+  if(!sessionReady||busy||sketch||drag||document.activeElement?.matches('#inspector input, #project-name'))throw new Error('Browser ist beschäftigt oder eine Skizze wird bearbeitet. Bitte den aktuellen Schritt zuerst beenden.');
+  if(args.projectId!==activeProjectId||args.revision!==projectRevision)throw new Error('Projekt oder Revision hat sich geändert. Erst formraum_get_project erneut lesen.');
+  const stored=library.read(activeProjectId);
+  if(!stored||stored.revision!==projectRevision)throw new Error('Projekt wurde in einem anderen Tab geändert. Bitte zuerst im Browser neu öffnen.');
+  let ok;
+  if(method==='apply')ok=await commit(args.project,{fit:true,message:'KI-Änderung übernommen · Strg Z zum Rückgängigmachen'});
+  else if(method==='open')ok=await openSaved(args.targetId);
+  else if(method==='create')ok=await newProject({version:1,name:args.name,objects:[]});
+  else if(method==='undo'){
+   if(!undoStack.length)throw new Error('Kein Schritt zum Rückgängigmachen vorhanden.');
+   const previousRevision=projectRevision;await undo();ok=projectRevision!==previousRevision;
+  }else throw new Error('Unbekannte Aktion.');
+  if(!ok)throw new Error(lastCommitError||'Aktion konnte nicht ausgeführt werden.');
+  return sessionState();
+ },
+ view(){renderer.render(scene,camera);return renderer.domElement.toDataURL('image/png').split(',')[1];},
+});

@@ -6,7 +6,8 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "playwright test"
+    "test": "playwright test",
+    "mcp": "node mcp/server.js"
   },
   "repository": {
     "type": "git",
@@ -19,13 +20,19 @@
   },
   "homepage": "https://github.com/Kami-00/formraum#readme",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "replicad": "1.2.0",
-    "replicad-opencascadejs": "1.1.0"
+    "replicad-opencascadejs": "1.1.0",
+    "ws": "8.22.0",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",
     "vite": "8.3.5"
   },
   "private": true,
-  "type": "module"
+  "type": "module",
+  "bin": {
+    "formraum-mcp": "mcp/server.js"
+  }
 }
