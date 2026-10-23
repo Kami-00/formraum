@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "name": "Beispielbauteil",
+  "objects": [
+    {
+      "id": "73d85ba9-8331-4d6c-ab80-0b2f498114c6",
+      "name": "Quader 01",
+      "kind": "box",
+      "params": {
+        "width": 50,
+        "depth": 30,
+        "height": 12
+      },
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "features": [
+        {
+          "type": "extrude",
+          "face": 6,
+          "sketch": {
+            "kind": "rectangle",
+            "center": [
+              -1,
+              1
+            ],
+            "width": 10,
+            "height": 10
+          },
+          "depth": 8,
+          "reference": {
+            "version": 1,
+            "kind": "face",
+            "center": [
+              0.5,
+              0.5,
+              1
+            ],
+            "surface": "Plane",
+            "normal": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "type": "fillet",
+          "edges": [
+            7
+          ],
+          "radius": 2,
+          "references": [
+            {
+              "version": 1,
+              "kind": "edge",
+              "center": [
+                0.5,
+                0,
+                0.6
+              ],
+              "curve": "Line",
+              "start": [
+                0,
+                0,
+                0.6
+              ],
+              "end": [
+                1,
+                0,
+                0.6
+              ]
+            }
+          ]
+        },
+        {
+          "type": "pocket",
+          "face": 12,
+          "sketch": {
+            "kind": "circle",
+            "center": [
+              0,
+              0
+            ],
+            "radius": 3
+          },
+          "depth": 6,
+          "reference": {
+            "version": 1,
+            "kind": "face",
+            "center": [
+              0.48,
+              0.5333333333333333,
+              1
+            ],
+            "surface": "Plane",
+            "normal": [
+              0,
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "type": "chamfer",
+          "edges": [
+            14
+          ],
+          "references": [
+            {
+              "version": 1,
+              "kind": "edge",
+              "center": [
+                1,
+                0.5333333333333333,
+                0.6
+              ],
+              "curve": "Line",
+              "start": [
+                1,
+                0.06666666666666667,
+                0.6
+              ],
+              "end": [
+                1,
+                1,
+                0.6
+              ]
+            }
+          ],
+          "distance": 1
+        }
+      ],
+      "color": "#67aba9"
+    }
+  ]
+}
