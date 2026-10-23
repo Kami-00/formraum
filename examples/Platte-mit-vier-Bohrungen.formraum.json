@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "name": "Platte mit vier Bohrungen",
+  "objects": [
+    {
+      "id": "plate-four-holes",
+      "name": "Montageplatte",
+      "kind": "box",
+      "params": {
+        "width": 60,
+        "depth": 40,
+        "height": 8
+      },
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "features": [
+        {
+          "type": "pocket",
+          "face": 6,
+          "reference": {
+            "version": 1,
+            "kind": "face",
+            "center": [
+              0.5,
+              0.5,
+              1
+            ],
+            "surface": "Plane",
+            "normal": [
+              0,
+              0,
+              1
+            ]
+          },
+          "depth": 8,
+          "throughAll": true,
+          "sketch": {
+            "kind": "circle",
+            "radius": 2.5,
+            "center": [
+              -20,
+              -10
+            ],
+            "distanceReference": "center",
+            "constraints": {
+              "u": {
+                "mode": "min",
+                "distance": 10
+              },
+              "v": {
+                "mode": "min",
+                "distance": 10
+              }
+            }
+          },
+          "contours": [
+            {
+              "kind": "circle",
+              "radius": 2.5,
+              "center": [
+                20,
+                -10
+              ],
+              "distanceReference": "center",
+              "constraints": {
+                "u": {
+                  "mode": "max",
+                  "distance": 10
+                },
+                "v": {
+                  "mode": "min",
+                  "distance": 10
+                }
+              }
+            },
+            {
+              "kind": "circle",
+              "radius": 2.5,
+              "center": [
+                20,
+                10
+              ],
+              "distanceReference": "center",
+              "constraints": {
+                "u": {
+                  "mode": "max",
+                  "distance": 10
+                },
+                "v": {
+                  "mode": "max",
+                  "distance": 10
+                }
+              }
+            },
+            {
+              "kind": "circle",
+              "radius": 2.5,
+              "center": [
+                -20,
+                10
+              ],
+              "distanceReference": "center",
+              "constraints": {
+                "u": {
+                  "mode": "min",
+                  "distance": 10
+                },
+                "v": {
+                  "mode": "max",
+                  "distance": 10
+                }
+              }
+            }
+          ],
+          "supportRectangle": true
+        }
+      ],
+      "color": "#67aba9"
+    }
+  ]
+}

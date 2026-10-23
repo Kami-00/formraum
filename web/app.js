@@ -1,3 +1,4 @@
+import {profileExtents,positionedCenter} from './sketch-position.js';
 import {SHAPES,shapeName,sketchName,isRadial} from './shapes.js';
 import {ProjectStore,PROJECT_PREFIX} from './project-store.js';
 import {setupSession} from './session.js';
@@ -18,7 +19,7 @@ let activeProjectId=null,projectRevision=0,lastCommitError='',sessionReady=false
 const makeDefault = () => ({version:1,name:'Mein Bauteil',objects:[{id:uid(),name:'Quader 01',kind:'box',params:{width:40,depth:30,height:12},position:[0,0,0],features:[],color:'#67aba9'}]});
 let project=makeDefault(), models=[], selectedId=project.objects[0].id, selectedFace=null, selectedEdges=new Set(), selectedFeature=-1;
 let tool='select', sketch=null, busy=false, undoStack=[], redoStack=[], hoverEdge=null, drag=null, requestVersion=0, toastTimer, edgeSize=1;
-let savedCamera=null, lastPointer=null;
+let savedCamera=null, lastPointer=null, selectedContour=0;
 let selectedBodies=new Set([selectedId]);
 
 const viewport=$('#viewport');
@@ -45,9 +46,9 @@ let bodyMeshes=[], edgeLines=[], groups=new Map(), viewHeight=90;
 const raycaster=new THREE.Raycaster(), pointer=new THREE.Vector2();
 const dimensionLayer=document.createElement('div');dimensionLayer.className='dimension-layer';viewport.appendChild(dimensionLayer);
 const dimensionInputs=new Map();
-for(const [key,caption] of [['width','B'],['height','H'],['diameter','Ø'],['radius','R']]){
+for(const [key,caption] of [['width','B'],['height','H'],['diameter','Ø'],['radius','R'],['distance-u','↔'],['distance-v','↕']]){
  const label=document.createElement('label');label.className='sketch-dimension';label.hidden=true;label.innerHTML=`<span>${caption}</span><input type="number" min="0.01" step="any" aria-label="Skizzenmaß ${key}"><span>mm</span>`;
- const input=label.querySelector('input');input.oninput=()=>setSketchDimension(key,input.value,input);input.onkeydown=e=>{if(e.key==='Enter')input.blur();};dimensionLayer.appendChild(label);dimensionInputs.set(key,{label,input});
+ const input=label.querySelector('input');if(key.startsWith('distance-'))input.min='0';input.oninput=()=>setSketchDimension(key,input.value,input);input.onkeydown=e=>{if(e.key==='Enter')input.blur();};dimensionLayer.appendChild(label);dimensionInputs.set(key,{label,input});
 }
 const measureLabel=document.createElement('div');measureLabel.className='sketch-measure';measureLabel.hidden=true;viewport.appendChild(measureLabel);
 
@@ -139,7 +140,7 @@ async function commit(next,{record=true,fit=false,message='',entry=null,create=f
   activeProjectId=saved.id;projectRevision=saved.revision;library.activate(saved.id);
   project=clone(result.project);models=result.objects;
   if(!project.objects.some(o=>o.id===selectedId))selectedId=project.objects[0]?.id||null;
-  selectedFace=null;selectedEdges.clear();hoverEdge=null;selectedFeature=-1;selectedBodies=new Set(selectedId?[selectedId]:[]);
+  selectedFace=null;selectedEdges.clear();hoverEdge=null;selectedFeature=-1;selectedContour=0;selectedBodies=new Set(selectedId?[selectedId]:[]);
   renderBodies();renderPanels();renderProjectList();$('#autosave-status').textContent='Projekt im Browser gespeichert';
   setStatus(`${models.length} Körper · Geometrie bereit`);
   if(fit)fitView();if(message)toast(message);return true;
@@ -201,7 +202,9 @@ function renderInspector(){
 }
 function renderFeatureInspector(feature){
  const isSketch=feature.type==='extrude'||feature.type==='pocket',scale=currentSpec().scale??1;
- $('#inspector').innerHTML=`<div class="inspector-heading">BEARBEITUNG ${selectedFeature+1}${icon(featureIcon(feature))}</div><div class="inspector-content"><h3>${esc(featureName(feature))}</h3>${isSketch?`${field('Höhe / Tiefe','feature-depth',feature.depth*scale)}<div class="section-title">SKIZZE · ${sketchName(feature.sketch.kind).toUpperCase()}</div>${isRadial(feature.sketch.kind)?field('Radius','feature-radius',feature.sketch.radius*scale):`${field('Breite','feature-width',feature.sketch.width*scale)}${field('Höhe','feature-height',feature.sketch.height*scale)}`}${feature.sketch.kind==='polygon'?field('Seiten','feature-sides',feature.sketch.sides,''):''}${field('Winkel','feature-angle',feature.sketch.angle??0,'°')}<div class="fields-2">${field('Mitte U','feature-u',feature.sketch.center[0]*scale)}${field('Mitte V','feature-v',feature.sketch.center[1]*scale)}</div>`:field(feature.type==='fillet'?'Radius':'Fasenmaß','feature-size',(feature.radius??feature.distance)*scale)}<button class="primary" data-action="apply-feature">${icon('check')}Änderung übernehmen</button><button class="subtle-button" data-action="show-body">Zurück zum Körper</button><p class="tip">Die folgenden Modellschritte werden mit deinen neuen Maßen erneut berechnet.</p></div>`;
+ const profiles=isSketch?[feature.sketch,...(feature.contours??[])]:[],profile=profiles[Math.min(selectedContour,profiles.length-1)];
+ $('#inspector').innerHTML=`<div class="inspector-heading">BEARBEITUNG ${selectedFeature+1}${icon(featureIcon(feature))}</div><div class="inspector-content"><h3>${esc(featureName(feature))}</h3>${isSketch?`${field('Höhe / Tiefe · alle Konturen','feature-depth',feature.depth*scale)}${feature.type==='pocket'?`<label class="locked-dimension"><input type="checkbox" data-feature-through-all ${feature.throughAll?'checked':''}> Durch alles ausschneiden</label>`:''}${profileSelector(profiles)}<div class="section-title">SKIZZE · ${sketchName(profile.kind).toUpperCase()}</div>${isRadial(profile.kind)?field('Radius','feature-radius',profile.radius*scale):`${field('Breite','feature-width',profile.width*scale)}${field('Höhe','feature-height',profile.height*scale)}`}${profile.kind==='polygon'?field('Seiten','feature-sides',profile.sides,''):''}${field('Winkel','feature-angle',profile.angle??0,'°')}${placementFields(profile.constraints,feature.supportRectangle??true,'feature',scale,profile.distanceReference)}<div class="fields-2">${field('Mitte U','feature-u',profile.center[0]*scale)}${field('Mitte V','feature-v',profile.center[1]*scale)}</div>`:field(feature.type==='fillet'?'Radius':'Fasenmaß','feature-size',(feature.radius??feature.distance)*scale)}<button class="primary" data-action="apply-feature">${icon('check')}Änderung übernehmen</button><button class="subtle-button" data-action="show-body">Zurück zum Körper</button><p class="tip">Die folgenden Modellschritte werden mit deinen neuen Maßen erneut berechnet.</p></div>`;
+ syncPlacementControls();
 }
 function inputNumber(key){const el=$(`[data-field="${key}"]`);const n=Number(el?.value);if(!el||!el.value||!Number.isFinite(n))throw new Error('Bitte gültige Zahlen eintragen.');return n;}
 async function applyDimensions(){
@@ -210,8 +213,10 @@ async function applyDimensions(){
   spec.name=$('[data-field="body-name"]').value.trim()||'Körper';
   for(const [key] of SHAPES[spec.kind]?.fields||[])spec.params[key]=inputNumber(key);
   if(spec.kind==='profile'){
-   spec.params.height=inputNumber('height');for(const key of isRadial(spec.profile.kind)?['radius']:['width','height'])spec.profile[key]=inputNumber('profile-'+key);
-   if(spec.profile.kind==='polygon')spec.profile.sides=inputNumber('profile-sides');spec.profile.angle=inputNumber('profile-angle');
+   spec.params.height=inputNumber('height');const profile=[spec.profile,...(spec.contours??[])][selectedContour];profile.role=$('[data-field="profile-role"]').value;
+   if(spec.contours)profile.center=[inputNumber('profile-u'),inputNumber('profile-v')];
+   for(const key of isRadial(profile.kind)?['radius']:['width','height'])profile[key]=inputNumber('profile-'+key);
+   if(profile.kind==='polygon')profile.sides=inputNumber('profile-sides');profile.angle=inputNumber('profile-angle');
   }
   if(spec.kind==='boolean')for(const [i,operand] of spec.operands.entries()){
    for(const [key] of SHAPES[operand.kind]?.fields||[])operand.params[key]=inputNumber('operand-'+i+'-'+key);
@@ -226,9 +231,12 @@ async function applyFeature(){
  try{
   const next=clone(project),f=next.objects.find(o=>o.id===selectedId).features[selectedFeature],scale=currentSpec().scale??1;
   if(f.type==='extrude'||f.type==='pocket'){
-   f.sketch.angle=inputNumber('feature-angle');if(f.sketch.kind==='polygon')f.sketch.sides=inputNumber('feature-sides');
-   f.depth=inputNumber('feature-depth')/scale;f.sketch.center=[inputNumber('feature-u')/scale,inputNumber('feature-v')/scale];
-   if(isRadial(f.sketch.kind))f.sketch.radius=inputNumber('feature-radius')/scale;else{f.sketch.width=inputNumber('feature-width')/scale;f.sketch.height=inputNumber('feature-height')/scale;}
+   const profile=[f.sketch,...(f.contours??[])][selectedContour];
+   profile.role=$('[data-field="profile-role"]').value;
+   profile.angle=inputNumber('feature-angle');if(profile.kind==='polygon')profile.sides=inputNumber('feature-sides');
+   profile.constraints=readPlacement('feature',scale);profile.distanceReference=$('[data-distance-reference]').value;
+   f.throughAll=f.type==='pocket'&&!!$('[data-feature-through-all]')?.checked;f.depth=inputNumber('feature-depth')/scale;profile.center=[inputNumber('feature-u')/scale,inputNumber('feature-v')/scale];
+   if(isRadial(profile.kind))profile.radius=inputNumber('feature-radius')/scale;else{profile.width=inputNumber('feature-width')/scale;profile.height=inputNumber('feature-height')/scale;}
   }else if(f.type==='fillet')f.radius=inputNumber('feature-size')/scale;else f.distance=inputNumber('feature-size')/scale;
   await commit(next,{message:'Bearbeitung geändert'});
  }catch(e){toast(e.message,true);}
@@ -257,7 +265,7 @@ function startPlaneSketch(){
  beginSketch({id:0,origin:[0,0,0],normal:[0,0,1],u:[1,0,0],v:[0,1,0]},true);
 }
 function beginSketch(face,standalone){
- sketch={face,standalone,kind:'rectangle',center:[0,0],width:10,height:10,radius:5,sides:6,angle:0,depth:10,snap:1,hasDrawn:false,locks:{},invalid:{}};tool='sketch';
+ sketch={face,standalone,kind:'rectangle',center:[0,0],width:10,height:10,radius:5,sides:6,angle:0,depth:10,snap:1,hasDrawn:false,locks:{},invalid:{},constraints:{},distanceReference:'outline',role:'solid',throughAll:false,profiles:[],activeContour:0};tool='sketch';sketch.profiles=[captureContour()];
  savedCamera={position:camera.position.clone(),up:camera.up.clone(),target:controls.target.clone(),height:viewHeight,zoom:camera.zoom};
  const origin=vec(face.origin),normal=vec(face.normal);camera.position.copy(origin).addScaledVector(normal,200);camera.up.copy(vec(face.v));camera.lookAt(origin);controls.target.copy(origin);controls.enableRotate=false;controls.mouseButtons.RIGHT=THREE.MOUSE.PAN;
  const aspect=viewport.clientWidth/viewport.clientHeight;viewHeight=Math.max((currentModel()?vec(currentModel().bounds.max).sub(vec(currentModel().bounds.min)).length():60)*1.2/Math.min(aspect,1),40);camera.zoom=1;resize();controls.update();
@@ -275,28 +283,32 @@ function cancelSketch(){
 function renderSketchInspector(){
  if(!sketch)return;const s=sketch;
  const dimension=(label,key,value)=>`${skField(label,key,value)}<label class="locked-dimension"><input type="checkbox" data-lock="${key}" ${s.locks[key]?'checked':''}> Maß festhalten</label>`;
- $('#inspector').innerHTML=`<div class="inspector-heading">${s.standalone?'SKIZZE · XY-EBENE':'SKIZZE AUF FLÄCHE '+s.face.id}${icon('sketch')}</div><div class="inspector-content"><p class="tool-description">Kontur aufziehen oder Maße eingeben. Maße sind auch direkt an der Kontur anklickbar.</p><div class="sketch-types">${['rectangle','circle','ellipse','polygon'].map(kind=>`<button data-sketch-kind="${kind}" class="${s.kind===kind?'active':''}">${sketchName(kind)}</button>`).join('')}</div><div class="sketch-status" id="sketch-status"></div>${isRadial(s.kind)?dimension('Radius','radius',s.radius):`<div class="fields-2"><div>${dimension('Breite','width',s.width)}</div><div>${dimension('Höhe','height',s.height)}</div></div>`}${s.kind==='circle'?skField('Durchmesser','diameter',s.radius*2):''}${s.kind==='polygon'?skField('Seiten','sides',s.sides,''):''}${skField('Winkel','angle',s.angle,'°')}<div class="section-title">MITTELPUNKT</div><div class="fields-2">${skField('U','center-u',s.center[0])}${skField('V','center-v',s.center[1])}</div><hr class="divider">${skField('Höhe / Tiefe','depth',s.depth)}<div class="action-duo"><button class="primary" data-action="extrude">${icon('extrude')}Aufbauen</button>${s.standalone?'':`<button class="subtle-button" data-action="pocket">${icon('cut')}Ausschneiden</button>`}</div><button class="subtle-button" data-action="cancel-sketch">Skizze verwerfen</button>${skField('Fangraster','snap',s.snap)}<p class="tip">Eingegebene Konturmaße bleiben beim Zeichnen fest. Fangraster 0 schaltet das Einrasten aus.</p></div>`;
+ $('#inspector').innerHTML=`<div class="inspector-heading">${s.standalone?'SKIZZE · XY-EBENE':'SKIZZE AUF FLÄCHE '+s.face.id}${icon('sketch')}</div><div class="inspector-content">${contourList()}<p class="tool-description">Kontur zeichnen oder Maße direkt eingeben.</p><div class="sketch-types">${['rectangle','circle','ellipse','polygon'].map(kind=>`<button data-sketch-kind="${kind}" class="${s.kind===kind?'active':''}">${sketchName(kind)}</button>`).join('')}</div><div class="sketch-status" id="sketch-status"></div>${isRadial(s.kind)?dimension('Radius','radius',s.radius):`<div class="fields-2"><div>${dimension('Breite','width',s.width)}</div><div>${dimension('Höhe','height',s.height)}</div></div>`}${s.kind==='circle'?skField('Durchmesser','diameter',s.radius*2):''}${s.kind==='polygon'?skField('Seiten','sides',s.sides,''):''}${skField('Winkel','angle',s.angle,'°')}${placementFields(s.constraints,!!s.face.sketchBounds,'sketch',1,s.distanceReference)}<div class="section-title">MITTELPUNKT</div><div class="fields-2">${skField('U','center-u',s.center[0])}${skField('V','center-v',s.center[1])}</div><hr class="divider">${skField('Höhe / Tiefe','depth',s.depth)}${s.standalone?'':`<label class="locked-dimension"><input type="checkbox" data-through-all ${s.throughAll?'checked':''}> Ausschneiden: Durch alles</label>`}<div class="action-duo"><button class="primary" data-action="extrude">${icon('extrude')}Aufbauen</button>${s.standalone?'':`<button class="subtle-button" data-action="pocket">${icon('cut')}Ausschneiden</button>`}</div><button class="subtle-button" data-action="cancel-sketch">Skizze verwerfen</button>${skField('Fangraster','snap',s.snap)}<p class="tip">Eingegebene Konturmaße bleiben beim Zeichnen fest. Fangraster 0 schaltet das Einrasten aus.</p></div>`;
  syncSketchInputs();
 }
 function skField(label,key,value,unit='mm'){return field(label,'sk-'+key,value,unit).replace(`data-field="sk-${key}"`,`data-sketch="${key}"`);}
 function setSketchDimension(key,raw,input){
  if(!sketch||busy)return;const n=Number(raw),positive=['width','height','radius','diameter','depth'].includes(key);
- const valid=raw!==''&&Number.isFinite(n)&&Math.abs(n)<=10000&&(!positive||n>=.01)&&(key!=='snap'||n>=0)&&(key!=='sides'||Number.isInteger(n)&&n>=3&&n<=64);
+ const valid=raw!==''&&Number.isFinite(n)&&Math.abs(n)<=10000&&(!positive||n>=.01)&&(!key.startsWith('distance-')||n>=0)&&(key!=='snap'||n>=0)&&(key!=='sides'||Number.isInteger(n)&&n>=3&&n<=64);
  sketch.invalid[key]=!valid;input?.setCustomValidity(valid?'':'Bitte ein gültiges Maß eingeben.');
  if(valid){
+  if(key==='depth'||key==='snap')for(const p of sketch.profiles)p.invalid[key]=false;
   if(key==='radius'||key==='diameter'){sketch.invalid.radius=false;sketch.invalid.diameter=false;}
-  if(key==='center-u')sketch.center[0]=n;else if(key==='center-v')sketch.center[1]=n;else if(key==='diameter')sketch.radius=n/2;else sketch[key]=n;
+  if(key.startsWith('distance-')){const axis=key.at(-1);if(sketch.constraints[axis])sketch.constraints[axis].distance=n;}
+  else if(key==='center-u'){sketch.center[0]=n;delete sketch.constraints.u;}else if(key==='center-v'){sketch.center[1]=n;delete sketch.constraints.v;}else if(key==='diameter')sketch.radius=n/2;else sketch[key]=n;
   if(['width','height','radius','diameter'].includes(key))sketch.locks[key==='diameter'?'radius':key]=true;
   if(key!=='snap'&&key!=='depth')sketch.hasDrawn=true;
  }
  syncSketchInputs();drawSketch();
 }
 function syncSketchInputs(){
- if(!sketch)return;const values={...sketch,diameter:sketch.radius*2,'center-u':sketch.center[0],'center-v':sketch.center[1]},invalid=Object.values(sketch.invalid).some(Boolean);
+ if(!sketch)return;applySketchPosition();saveContour();const values={...sketch,'distance-u':sketch.constraints.u?.distance??0,'distance-v':sketch.constraints.v?.distance??0,diameter:sketch.radius*2,'center-u':sketch.center[0],'center-v':sketch.center[1]},invalid=sketch.profiles.some(p=>Object.values(p.invalid).some(Boolean));
  $$('[data-sketch]').forEach(el=>{if(document.activeElement!==el&&!sketch.invalid[el.dataset.sketch])el.value=Math.round(values[el.dataset.sketch]*1000)/1000;});
  $$('[data-lock]').forEach(el=>el.checked=!!sketch.locks[el.dataset.lock]);
+ for(const axis of ['u','v']){const el=$(`[data-sketch="center-${axis}"]`);if(el)el.disabled=!!sketch.constraints[axis];}
+ syncPlacementControls();
  const status=$('#sketch-status');if(status){status.classList.toggle('ready',sketch.hasDrawn&&!invalid);status.textContent=invalid?'Bitte ungültige Maße korrigieren':sketch.hasDrawn?'Kontur bereit · Maße anpassbar':'Mit gedrückter linker Maustaste aufziehen';}
- $$('[data-action="extrude"],[data-action="pocket"]').forEach(b=>b.disabled=!sketch.hasDrawn||invalid||busy);
+ $$('[data-action="extrude"],[data-action="pocket"]').forEach(b=>b.disabled=!sketch.profiles.some(p=>p.hasDrawn)||invalid||busy);
 }
 function toSketchWorld(u,v,lift=.06){return vec(sketch.face.origin).addScaledVector(vec(sketch.face.u),u).addScaledVector(vec(sketch.face.v),v).addScaledVector(vec(sketch.face.normal),lift);}
 function drawSketch(){
@@ -306,18 +318,22 @@ function drawSketch(){
  const gridPoints=[];const extent=Math.min(Math.ceil(size/gridStep),100)*gridStep;
  for(let t=-extent;t<=extent;t+=gridStep){gridPoints.push(toSketchWorld(t,-extent,.025),toSketchWorld(t,extent,.025),toSketchWorld(-extent,t,.025),toSketchWorld(extent,t,.025));}
  const g=new THREE.BufferGeometry().setFromPoints(gridPoints);sketchRoot.add(new THREE.LineSegments(g,new THREE.LineBasicMaterial({color:0x79aba3,transparent:true,opacity:.13,depthTest:false})));
+ for(const [i,profile] of s.profiles.entries())if(i!==s.activeContour&&profile.hasDrawn){
+  const line=new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(contourPoints(profile)),new THREE.LineBasicMaterial({color:profile.role==='hole'?0xd78835:0x579aab,depthTest:false}));line.renderOrder=21;sketchRoot.add(line);
+ }
  if(!s.hasDrawn)return;
  let points=[];const [cu,cv]=s.center,angle=s.angle*Math.PI/180;
  const point=(x,y)=>toSketchWorld(cu+x*Math.cos(angle)-y*Math.sin(angle),cv+x*Math.sin(angle)+y*Math.cos(angle));
  if(s.kind==='rectangle')points=[[-s.width/2,-s.height/2],[s.width/2,-s.height/2],[s.width/2,s.height/2],[-s.width/2,s.height/2]].map(([x,y])=>point(x,y));
  else {const count=s.kind==='polygon'?s.sides:96;for(let i=0;i<count;i++){const a=i*Math.PI*2/count+(s.kind==='polygon'?Math.PI/2:0);points.push(point(Math.cos(a)*(s.kind==='ellipse'?s.width/2:s.radius),Math.sin(a)*(s.kind==='ellipse'?s.height/2:s.radius)));}}
- const line=new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(points),new THREE.LineBasicMaterial({color:0x008c7b,depthTest:false}));line.renderOrder=20;sketchRoot.add(line);
+ const line=new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(points),new THREE.LineBasicMaterial({color:s.role==='hole'?0xd78835:0x008c7b,depthTest:false}));line.renderOrder=20;sketchRoot.add(line);
  const center=toSketchWorld(cu,cv),fillPositions=[];
  for(let i=0;i<points.length;i++)fillPositions.push(...center.toArray(),...points[i].toArray(),...points[(i+1)%points.length].toArray());
  const fillGeom=new THREE.BufferGeometry();fillGeom.setAttribute('position',new THREE.Float32BufferAttribute(fillPositions,3));const fill=new THREE.Mesh(fillGeom,new THREE.MeshBasicMaterial({color:0x1cb79e,transparent:true,opacity:.16,depthTest:false,side:THREE.DoubleSide,depthWrite:false}));fill.renderOrder=19;sketchRoot.add(fill);
  const offset=viewHeight/camera.zoom/viewport.clientHeight*32;
  if(isRadial(s.kind))sketchDimension(point(s.kind==='circle'?-s.radius:0,0),point(s.radius,0),s.kind==='circle'?'diameter':'radius',s.kind==='circle'?s.radius*2:s.radius);
  else {sketchDimension(point(-s.width/2,-s.height/2-offset),point(s.width/2,-s.height/2-offset),'width',s.width);sketchDimension(point(s.width/2+offset,-s.height/2),point(s.width/2+offset,s.height/2),'height',s.height);}
+ drawPlacementDimensions();
 
 }
 function pointerRay(event){const rect=renderer.domElement.getBoundingClientRect();pointer.set((event.clientX-rect.left)/rect.width*2-1,-(event.clientY-rect.top)/rect.height*2+1);raycaster.setFromCamera(pointer,camera);return raycaster.ray;}
@@ -333,11 +349,18 @@ function pickEdge(event){
  return raycaster.intersectObjects(edgeLines,false).find(hit=>!bodyHit||hit.distance<bodyHit.distance+raycaster.params.Line.threshold*2)||null;
 }
 async function applySketch(type){
- if(!sketch?.hasDrawn||busy||Object.values(sketch.invalid).some(Boolean))return;
+ if(!sketch||busy)return;saveContour();
+ if(!sketch.profiles.some(p=>p.hasDrawn)||sketch.profiles.some(p=>Object.values(p.invalid).some(Boolean)))return;
  const s=clone(sketch),next=clone(project),spec=next.objects.find(o=>o.id===selectedId),scale=s.standalone?1:(spec.scale??1);
- const profile={kind:s.kind,center:s.center.map(v=>v/scale),angle:s.angle};if(!isRadial(s.kind)){profile.width=s.width/scale;profile.height=s.height/scale;}else {profile.radius=s.radius/scale;if(s.kind==='polygon')profile.sides=s.sides;}
- if(s.standalone)next.objects.push({id:uid(),name:sketchName(s.kind),kind:'profile',profile,plane:'XY',params:{height:s.depth},position:[...s.center,0],features:[],color:'#67aba9'});
- else spec.features.push({type,face:s.face.id,reference:s.face.reference,sketch:profile,depth:s.depth/scale});
+ const profiles=s.profiles.filter(p=>p.hasDrawn).map(p=>{
+  const profile={kind:p.kind,center:p.center.map(v=>v/scale),angle:p.angle,role:p.role,distanceReference:p.distanceReference};
+  if(!s.standalone)profile.constraints=Object.fromEntries(Object.entries(p.constraints).map(([axis,c])=>[axis,{...c,...(c.mode==='center'?{}:{distance:c.distance/scale})}]));
+  if(!isRadial(p.kind)){profile.width=p.width/scale;profile.height=p.height/scale;}else {profile.radius=p.radius/scale;if(p.kind==='polygon')profile.sides=p.sides;}
+  return profile;
+ });
+ const [profile,...contours]=profiles;
+ if(s.standalone)next.objects.push({id:uid(),name:sketchName(profile.kind),kind:'profile',profile,contours,plane:'XY',params:{height:s.depth},position:[0,0,0],features:[],color:'#67aba9'});
+ else spec.features.push({type,face:s.face.id,reference:s.face.reference,sketch:profile,contours,depth:s.depth/scale,...(type==='pocket'?{throughAll:s.throughAll}:{})});
  // A failed operation keeps the editable sketch and all prior geometry.
  const ok=await commit(next,{message:type==='extrude'?'Skizze aufgebaut':'Tasche ausgeschnitten'});
  if(ok){cancelSketch();selectedFace=null;if(s.standalone)selectObject(next.objects.at(-1).id);renderSelection();renderPanels();}
@@ -450,10 +473,17 @@ document.addEventListener('click',async event=>{
  if(button?.dataset.removeFeature!==undefined){
   const next=clone(project),features=next.objects.find(o=>o.id===selectedId).features;const count=features.length-Number(button.dataset.removeFeature);features.splice(Number(button.dataset.removeFeature));await commit(next,{message:count>1?'Bearbeitung und nachfolgende Schritte entfernt · Strg Z zum Wiederherstellen':'Bearbeitung entfernt'});return;
  }
- const featureRow=event.target.closest('[data-feature]');if(featureRow){if(sketch)cancelSketch();tool='select';selectedFeature=Number(featureRow.dataset.feature);selectedFace=null;selectedEdges.clear();renderSelection();renderPanels();return;}
+ const featureRow=event.target.closest('[data-feature]');if(featureRow){if(sketch)cancelSketch();tool='select';selectedFeature=Number(featureRow.dataset.feature);selectedContour=0;selectedFace=null;selectedEdges.clear();renderSelection();renderPanels();return;}
  if(button?.dataset.removeEdge){selectedEdges.delete(Number(button.dataset.removeEdge));renderSelection();renderInspector();return;}
- if(button?.dataset.sketchKind&&sketch){sketch.kind=button.dataset.sketchKind;sketch.invalid={};renderSketchInspector();drawSketch();updateToolButtons();return;}
+ if(button?.dataset.contour!==undefined&&sketch){switchContour(Number(button.dataset.contour));return;}
+ if(button?.dataset.contourRole&&sketch){sketch.role=button.dataset.contourRole;saveContour();renderSketchInspector();drawSketch();return;}
+ if(button?.dataset.sketchKind&&sketch){sketch.kind=button.dataset.sketchKind;sketch.invalid={};applySketchPosition();renderSketchInspector();drawSketch();updateToolButtons();return;}
  switch(button?.dataset.action){
+  case 'add-contour':addContour(false);break;
+  case 'duplicate-contour':addContour(true);break;
+  case 'remove-contour':removeContour();break;
+  case 'center-sketch':if(sketch){sketch.constraints={u:{mode:'center'},v:{mode:'center'}};sketch.invalid={};sketch.hasDrawn=true;renderSketchInspector();drawSketch();}break;
+  case 'release-position':if(sketch){sketch.constraints={};sketch.invalid['distance-u']=false;sketch.invalid['distance-v']=false;renderSketchInspector();drawSketch();}break;
   case 'apply-dimensions':applyDimensions();break;
   case 'duplicate-body':duplicateSelected();break;
   case 'ground-body':groundSelected();break;
@@ -472,6 +502,13 @@ document.addEventListener('click',async event=>{
 });
 $('#inspector').addEventListener('input',event=>{
  if(event.target.dataset.field==='edge-size'){const n=Number(event.target.value);if(Number.isFinite(n)&&n>0)edgeSize=n;}
+ if(event.target.hasAttribute('data-through-all')&&sketch){sketch.throughAll=event.target.checked;return;}
+ if(event.target.hasAttribute('data-distance-reference')){if(sketch){sketch.distanceReference=event.target.value;syncSketchInputs();drawSketch();}return;}
+ if(event.target.matches('[data-profile-select]')){selectedContour=Number(event.target.value);renderInspector();return;}
+ if(event.target.dataset.placement){
+  if(sketch){const axis=event.target.dataset.placement,mode=event.target.value;if(mode==='free')delete sketch.constraints[axis];else sketch.constraints[axis]={mode,...(mode==='center'?{}:{distance:0})};sketch.invalid['distance-'+axis]=false;sketch.hasDrawn=true;syncSketchInputs();drawSketch();}
+  else syncPlacementControls();return;
+ }
  if(!sketch)return;
  if(event.target.dataset.lock){sketch.locks[event.target.dataset.lock]=event.target.checked;return;}
  if(event.target.dataset.sketch)setSketchDimension(event.target.dataset.sketch,event.target.value,event.target);
@@ -566,7 +603,7 @@ setupSession({
 function bodyParameterFields(spec){
  if(SHAPES[spec.kind])return '<div class="section-title">MASSE DES GRUNDKÖRPERS</div>'+SHAPES[spec.kind].fields.map(([key,label])=>field(label,key,spec.params[key]??SHAPES[spec.kind].params[key],key==='sides'?'':'mm')).join('');
  if(spec.kind==='boolean')return `<div class="section-title">AUSGANGSFORMEN · ${esc(({union:'Vereint',cut:'Ausgeschnitten',intersect:'Schnittmenge'})[spec.operation])}</div>`+spec.operands.map((o,i)=>`<details class="operand-editor"><summary>${esc(o.name||shapeName(o.kind))}</summary>${(SHAPES[o.kind]?.fields||[]).map(([key,label])=>field(label,'operand-'+i+'-'+key,o.params?.[key]??SHAPES[o.kind].params[key],key==='sides'?'':'mm')).join('')}<div class="fields-3">${['x','y','z'].map((axis,n)=>field(axis.toUpperCase(),'operand-'+i+'-'+axis,o.position?.[n]||0)).join('')}</div></details>`).join('');
- if(spec.kind==='profile'){const s=spec.profile;return `<div class="section-title">SKIZZE · ${esc(sketchName(s.kind))}</div>${isRadial(s.kind)?field('Radius','profile-radius',s.radius):field('Breite','profile-width',s.width)+field('Höhe','profile-height',s.height)}${s.kind==='polygon'?field('Seiten','profile-sides',s.sides,''):''}${field('Winkel','profile-angle',s.angle||0,'°')}${field('Aufbauhöhe','height',spec.params.height)}`;}
+ if(spec.kind==='profile'){const profiles=[spec.profile,...(spec.contours??[])],s=profiles[Math.min(selectedContour,profiles.length-1)];return `${profileSelector(profiles)}${spec.contours?field('Mitte U','profile-u',s.center?.[0]??0)+field('Mitte V','profile-v',s.center?.[1]??0):''}<div class="section-title">SKIZZE · ${esc(sketchName(s.kind))}</div>${isRadial(s.kind)?field('Radius','profile-radius',s.radius):field('Breite','profile-width',s.width)+field('Höhe','profile-height',s.height)}${s.kind==='polygon'?field('Seiten','profile-sides',s.sides,''):''}${field('Winkel','profile-angle',s.angle||0,'°')}${field('Aufbauhöhe','height',spec.params.height)}`;}
  return '<p class="tip">Die Grundform des Imports bleibt erhalten. Skizzen und Kantenbearbeitungen kannst du ergänzen.</p>';
 }
 function selectedSpecs(){return [currentSpec(),...project.objects.filter(o=>o.id!==selectedId&&selectedBodies.has(o.id))].filter(Boolean);}
@@ -621,4 +658,73 @@ function sketchDimension(a,b,key,value){
  const lines=new THREE.LineSegments(geom,new THREE.LineBasicMaterial({color:0x276c89,depthTest:false}));lines.renderOrder=30;sketchRoot.add(lines);
  middle.project(camera);label.hidden=false;label.style.left=`${Math.max(50,Math.min(viewport.clientWidth-50,(middle.x+1)/2*viewport.clientWidth))}px`;label.style.top=`${Math.max(30,Math.min(viewport.clientHeight-30,(1-middle.y)/2*viewport.clientHeight))}px`;
  if(document.activeElement!==input&&!sketch.invalid[key]){input.value=Number(value.toFixed(3));input.setCustomValidity('');}
+}
+
+function placementFields(constraints={},hasEdges,context,scale=1,distanceReference='outline'){
+ return `<div class="section-title">POSITION FESTLEGEN</div><p class="tip">${hasEdges?'Abstand von der Außenkante der Fläche zum gewählten Maßbezug. Links/rechts und unten/oben beziehen sich auf die Skizzenansicht.':'Zentrieren ist verfügbar. Kantenabstände benötigen eine rechteckige Außenkontur, deren Kanten entlang U/V liegen.'}</p><label class="field"><span>Abstand bis</span><select data-distance-reference aria-label="Abstand bis"><option value="outline" ${distanceReference==='outline'?'selected':''}>Konturrand</option><option value="center" ${distanceReference==='center'?'selected':''}>Mittelpunkt</option></select></label>${['u','v'].map((axis,i)=>{
+  const c=constraints?.[axis],options=[['free','Frei verschieben'],['center','Zentriert'],...(hasEdges?[["min",i?'Untere Kante':'Linke Kante'],['max',i?'Obere Kante':'Rechte Kante']]:[])];
+  return `<div class="placement-row"><label class="field"><span>${i?'Vertikal':'Horizontal'}</span><select data-placement="${axis}" data-context="${context}" aria-label="${i?'Vertikaler':'Horizontaler'} Bezug">${options.map(([value,label])=>`<option value="${value}" ${value===(c?.mode??'free')?'selected':''}>${label}</option>`).join('')}</select></label>${context==='sketch'?skField(i?'Abstand vertikal':'Abstand horizontal','distance-'+axis,(c?.distance??0)*scale):field(i?'Abstand vertikal':'Abstand horizontal','feature-distance-'+axis,(c?.distance??0)*scale)}</div>`;
+ }).join('')}${context==='sketch'?'<div class="body-actions"><button class="subtle-button" data-action="center-sketch">Auf Fläche zentrieren</button><button class="subtle-button" data-action="release-position">Position freigeben</button></div>':''}`;
+}
+function syncPlacementControls(){
+ for(const select of $$('[data-placement]')){
+  const axis=select.dataset.placement,context=select.dataset.context;
+  if(sketch&&context==='sketch')select.value=sketch.constraints[axis]?.mode??'free';
+  const input=context==='sketch'?$(`[data-sketch="distance-${axis}"]`):$(`[data-field="feature-distance-${axis}"]`);
+  if(input)input.disabled=!['min','max'].includes(select.value);
+  const center=context==='sketch'?$(`[data-sketch="center-${axis}"]`):$(`[data-field="feature-${axis}"]`);
+  if(center)center.disabled=select.value!=='free';
+ }
+}
+function readPlacement(context,scale){
+ const constraints={};
+ for(const axis of ['u','v']){const mode=$(`[data-placement="${axis}"][data-context="${context}"]`).value;if(mode!=='free')constraints[axis]={mode,...(mode==='center'?{}:{distance:inputNumber(context+'-distance-'+axis)/scale})};}
+ return constraints;
+}
+function applySketchPosition(){
+ try{sketch.center=positionedCenter(sketch,sketch.face.sketchBounds);sketch.invalid.position=false;}
+ catch{sketch.invalid.position=true;}
+}
+function drawPlacementDimensions(){
+ const s=sketch,b=s.face.sketchBounds;if(!b)return;
+ const e=profileExtents(s);
+ for(const [i,axis] of ['u','v'].entries()){
+  const c=s.constraints[axis];if(!c||c.mode==='center')continue;
+  const edge=b[c.mode][i],contour=s.center[i]+(s.distanceReference==='center'?0:e[c.mode][i]),other=1-i;
+  const a=[...s.center],z=[...s.center];a[i]=edge;z[i]=contour;
+  const originalA=[...a],originalZ=[...z],offset=viewHeight/camera.zoom/viewport.clientHeight*38;
+  a[other]=z[other]=s.center[other]+(i===0?e.max[other]+offset:e.min[other]-offset);
+  const extensions=new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints([toSketchWorld(...originalA),toSketchWorld(...a),toSketchWorld(...originalZ),toSketchWorld(...z)]),new THREE.LineBasicMaterial({color:0x789ba8,depthTest:false,transparent:true,opacity:.6}));extensions.renderOrder=29;sketchRoot.add(extensions);
+  sketchDimension(toSketchWorld(...a),toSketchWorld(...z),'distance-'+axis,c.distance);
+  const start=[0,0],end=[0,0];start[i]=end[i]=edge;start[other]=b.min[other];end[other]=b.max[other];
+  const line=new THREE.Line(new THREE.BufferGeometry().setFromPoints([toSketchWorld(...start),toSketchWorld(...end)]),new THREE.LineBasicMaterial({color:0xe69b3a,depthTest:false,transparent:true}));line.renderOrder=35;sketchRoot.add(line);
+ }
+}
+
+const contourKeys=['kind','center','width','height','radius','sides','angle','hasDrawn','locks','invalid','constraints','distanceReference','role'];
+function captureContour(){return Object.fromEntries(contourKeys.map(key=>[key,clone(sketch[key])]));}
+function saveContour(){sketch.profiles[sketch.activeContour]=captureContour();}
+function switchContour(index){
+ if(!sketch||busy)return;saveContour();sketch.activeContour=index;Object.assign(sketch,clone(sketch.profiles[index]));renderSketchInspector();drawSketch();updateToolButtons();
+}
+function addContour(duplicate){
+ if(!sketch||busy)return;saveContour();if(sketch.profiles.length>=12){toast('Maximal zwölf Konturen pro Skizze.');return;}
+ const profile=duplicate?captureContour():{kind:'circle',center:[0,0],width:10,height:10,radius:3,sides:6,angle:0,hasDrawn:false,locks:{},invalid:{},constraints:{},distanceReference:'outline',role:'solid'};
+ if(duplicate){profile.center[0]+=10;profile.constraints={};profile.invalid={};}
+ sketch.profiles.push(profile);switchContour(sketch.profiles.length-1);
+}
+function removeContour(){
+ if(!sketch||busy||sketch.profiles.length<2)return;sketch.profiles.splice(sketch.activeContour,1);sketch.activeContour=Math.min(sketch.activeContour,sketch.profiles.length-1);Object.assign(sketch,clone(sketch.profiles[sketch.activeContour]));renderSketchInspector();drawSketch();
+}
+function contourList(){
+ return `<div class="section-title">KONTUREN · ${sketch.profiles.length}/12</div><div class="contour-list">${sketch.profiles.map((p,i)=>`<button data-contour="${i}" class="${i===sketch.activeContour?'active':''}">${i+1}. ${sketchName(i===sketch.activeContour?sketch.kind:p.kind)}${(i===sketch.activeContour?sketch.role:p.role)==='hole'?' · Aussparung':''}${Object.values(p.invalid).some(Boolean)?' · Maß prüfen':''}</button>`).join('')}</div><div class="body-actions"><button class="subtle-button" data-action="add-contour">+ Kontur</button><button class="subtle-button" data-action="duplicate-contour">Kopieren</button><button class="subtle-button" data-action="remove-contour" ${sketch.profiles.length<2?'disabled':''}>Entfernen</button></div><div class="body-role"><button data-contour-role="solid" class="${sketch.role!=='hole'?'active':''}">Normale Kontur</button><button data-contour-role="hole" class="${sketch.role==='hole'?'active':''}">Aussparung</button></div><details class="sketch-help"><summary>Bohrungen und Aussparungen</summary><p class="tip">Bohrungen: normale Kreise zeichnen, dann Ausschneiden. Aussparungen innerhalb normaler Konturen bleiben beim Aufbauen frei. Die Tiefe gilt für alle Konturen.</p></details>`;
+}
+function contourPoints(p){
+ const a=p.angle*Math.PI/180,c=Math.cos(a),s=Math.sin(a),point=(x,y)=>toSketchWorld(p.center[0]+x*c-y*s,p.center[1]+x*s+y*c);
+ if(p.kind==='rectangle')return [[-p.width/2,-p.height/2],[p.width/2,-p.height/2],[p.width/2,p.height/2],[-p.width/2,p.height/2]].map(([x,y])=>point(x,y));
+ const count=p.kind==='polygon'?p.sides:96;return Array.from({length:count},(_,i)=>{const a=2*Math.PI*i/count+(p.kind==='polygon'?Math.PI/2:0);return point(Math.cos(a)*(p.kind==='ellipse'?p.width/2:p.radius),Math.sin(a)*(p.kind==='ellipse'?p.height/2:p.radius));});
+}
+function profileSelector(profiles){
+ const index=Math.min(selectedContour,profiles.length-1);selectedContour=index;
+ return `<label class="field"><span>Kontur bearbeiten</span><select data-profile-select aria-label="Kontur bearbeiten">${profiles.map((p,i)=>`<option value="${i}" ${i===index?'selected':''}>${i+1}. ${sketchName(p.kind)}${p.role==='hole'?' · Aussparung':''}</option>`).join('')}</select></label><label class="field"><span>Konturrolle</span><select data-field="profile-role" aria-label="Konturrolle"><option value="solid" ${profiles[index].role!=='hole'?'selected':''}>Normale Kontur</option><option value="hole" ${profiles[index].role==='hole'?'selected':''}>Aussparung</option></select></label>`;
 }
