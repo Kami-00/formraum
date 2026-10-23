@@ -22,6 +22,7 @@ self.addEventListener('install',event=>event.waitUntil((async()=>{
   try{const cache=await caches.open(CACHE);await cache.addAll(ASSETS);}
   catch(error){await caches.delete(CACHE);throw error;}
 })()));
+self.addEventListener('message',event=>{if(event.data==='ACTIVATE_UPDATE')self.skipWaiting();});
 self.addEventListener('activate',event=>event.waitUntil((async()=>{
   for(const key of await caches.keys())if(key.startsWith(PREFIX)&&key!==CACHE)await caches.delete(key);
   await self.clients.claim();
