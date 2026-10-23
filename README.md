@@ -47,11 +47,12 @@ Die [MCP-Anleitung](docs/MCP.md) enthält die Einrichtung für Codex und andere 
 
 ## Arbeiten am Modell
 
-1. **Körper wählen:** Quader oder Zylinder hinzufügen, anklicken und Maße beziehungsweise Position rechts eintragen.
-2. **Fläche wählen:** Eine ebene Fläche anklicken und **Skizze** aktivieren. Rechteck oder Kreis auf der Fläche aufziehen.
+1. **Körper wählen:** Quader, Zylinder, Kugel, Kegel/Kegelstumpf, Rohr, Ring, Keil, Pyramide, Vieleck-Prisma oder Kapsel hinzufügen. Maße, Position, Drehung (X → Y → Z) und gleichmäßige Skalierung rechts bearbeiten. Duplizieren und Auf Boden erleichtern das Platzieren.
+2. **Skizze anlegen:** Eine ebene Fläche anklicken und **Skizze** aktivieren, oder **Skizze auf Grundebene** für einen eigenen Körper. Rechteck, Kreis, Ellipse oder regelmäßiges Vieleck zeichnen. Maße direkt an der Kontur anklicken oder rechts eingeben. Eingegebene Konturmaße werden beim Zeichnen festgehalten; das Häkchen löst die Festlegung. Mittelpunkt, Winkel, Polygonseiten und Fangraster sind einstellbar.
 3. **Bearbeiten:** Höhe beziehungsweise Tiefe angeben und die Skizze **Aufbauen** oder **Ausschneiden** lassen.
 4. **Kanten bearbeiten:** **Rundung** oder **Fase** wählen, Kanten anklicken und Radius beziehungsweise Fasenmaß eingeben.
-5. **Sichern:** **Speichern** lädt eine bearbeitbare `.formraum.json`-Datei herunter. **Exportieren** erzeugt STEP für andere CAD-Systeme oder STL für den 3D-Druck. **Öffnen** unterstützt Projektdateien und STEP (`.step`, `.stp`).
+5. **Kombinieren:** Mehrere Körper per Häkchen oder Umschalt-Klick auswählen. Ausrichten bezieht sich auf den zuerst ausgewählten Körper. Vereinen, Von Basis abziehen und Schnittmenge verbinden Formen. **Gruppieren** vereint feste Körper und zieht als **Bohrung** markierte Körper ab. Ausgangsformen bleiben in der Kombination gespeichert; ihre Grundmaße und Positionen lassen sich dort bearbeiten. Ohne weitere Modellschritte lässt sich die Kombination auflösen. Alle Ergebnisse müssen zusammenhängend sein. Bohrkörper allein erscheinen nicht im Export.
+6. **Sichern:** **Speichern** lädt eine bearbeitbare `.formraum.json`-Datei herunter. **Exportieren** erzeugt STEP für andere CAD-Systeme oder STL für den 3D-Druck. **Öffnen** unterstützt Projektdateien und STEP (`.step`, `.stp`).
 
 Rechts ziehen dreht, das Mausrad zoomt, die mittlere Maustaste verschiebt die Ansicht. **F** passt das Modell ein. **Strg Z** macht einen Schritt rückgängig, **Strg Y** stellt ihn wieder her. Unter macOS funktioniert auch Cmd. **Oben**, **Vorn** und **Rechts** helfen beim Zeichnen.
 
@@ -61,9 +62,13 @@ Rechts ziehen dreht, das Mausrad zoomt, die mittlere Maustaste verschiebt die An
 
 Die automatischen Projektsicherungen liegen im lokalen Browser-Speicher der jeweiligen Website-Adresse. Sie ersetzen keine heruntergeladenen Projektdateien. Es gibt keine Cloud-Synchronisierung, Telemetrie oder extern geladenen Laufzeitbibliotheken. Die optionale MCP-Verbindung ist davon getrennt. Der CAD-Kern und seine Abhängigkeiten werden zusammen mit der Anwendung ausgeliefert.
 
-Unterstützt werden Quader, Zylinder, Rechteck- und Kreisskizzen auf ebenen Flächen, Aufbauen, Ausschneiden, Rundung, Fase und STEP-Volumenkörper. Freie Linienzüge, vollständig bemaßte Skizzen mit Abhängigkeiten und Baugruppenmechanik sind noch nicht umgesetzt. Jede Bearbeitung muss einen einzelnen gültigen Volumenkörper ergeben. Pro Projekt sind bis zu 30 Körper mit jeweils 50 Bearbeitungen vorgesehen; Dateiimporte sind auf 25 MB begrenzt. Komplexe Modelle hängen von Arbeitsspeicher und Leistung des Geräts ab. Nach 120 Sekunden wird eine hängende Berechnung abgebrochen; der Worker startet bei der nächsten Anfrage neu.
+Unterstützt werden zehn Grundformen, vier Skizzenprofile, direkte Maßfelder, Konturmaße festhalten, Position/Winkel, Aufbauen, Ausschneiden, Körperkombinationen, Ausrichten, Rundung, Fase und STEP-Volumenkörper. Skizzenmaße und Bearbeitungstiefen bleiben nach dem Aufbau über die Modellschritte editierbar, auch bei skalierten Körpern. Dies ist ein erster Ausbau zum Übergang von einfachem Formenbauen zu parametrischem CAD, keine vollständige Tinkercad-/Onshape-Funktionsgleichheit. Freie Linienzüge, vollständig bemaßte Skizzen mit Abhängigkeiten und Baugruppenmechanik sind noch nicht umgesetzt. Jede Bearbeitung muss einen einzelnen gültigen Volumenkörper ergeben. Pro Projekt sind bis zu 30 Körper mit jeweils 50 Bearbeitungen vorgesehen; Kombinationen sind auf acht Verschachtelungsebenen und insgesamt 150 Ausgangskörper begrenzt; Dateiimporte sind auf 25 MB begrenzt. Komplexe Modelle hängen von Arbeitsspeicher und Leistung des Geräts ab. Nach 120 Sekunden wird eine hängende Berechnung abgebrochen; der Worker startet bei der nächsten Anfrage neu.
 
 Neue Website-Versionen werden über **Neue Version · Neu laden** angeboten, sobald der Offline-Cache bereit ist. Beim Wechsel von älteren Versionen ohne diesen Hinweis alle Formraum-Tabs schließen und die Seite erneut öffnen; gespeicherte Projekte bleiben erhalten.
+
+## Weiterer CAD-Ausbau
+
+Beide Arbeitsweisen bleiben gleich wichtig: direktes Formenbauen und präzises Konstruieren. Die nächsten größeren Bausteine sind freie Linien/Bögen, ein geometrischer Constraint-Solver (Koinzidenz, Parallelität, Tangentialität und Abstandsmaße zwischen Elementen), Spiegeln/Muster, Rotationskörper aus eigenen Skizzen und Loft/Sweep. Baugruppen und Zeichnungsableitung benötigen darauf aufbauende eigene Werkzeuge. Diese Funktionen sind noch nicht enthalten.
 
 ## Prüfungen
 
@@ -74,7 +79,7 @@ npm run build
 npm test
 ```
 
-Die Tests führen den tatsächlichen WebAssembly-Kern im Browser aus. Sie prüfen Volumina, Flächen-/Kantenzuordnung, Aufbauen/Ausschneiden, Rundung/Fase, unveränderte Daten nach fehlgeschlagenen Operationen, das bestehende Beispielprojekt, STEP-Rückimport, binäres STL, Speichern, Rückgängig/Wiederholen und Wiederherstellung. Ein eigener Test lädt den Produktionsbuild von einem rein statischen Host unter `/formraum/`, schaltet das Netzwerk aus, lädt neu und modelliert/exportiert offline. Zusätzliche Tests prüfen Projektverwaltung, Migration, Speicherkonflikte, Speicherplatzfehler und die vollständige MCP-Verbindung über STDIO einschließlich Revisionen, Rückgängig, Ansichtsbild, Origin-/Code-Prüfung und einer HTTPS-Browser-Origin. CI führt dieselben Prüfungen aus.
+Die Tests führen den tatsächlichen WebAssembly-Kern im Browser aus. Sie prüfen Volumina, Flächen-/Kantenzuordnung, Aufbauen/Ausschneiden, Rundung/Fase, unveränderte Daten nach fehlgeschlagenen Operationen, das bestehende Beispielprojekt, STEP-Rückimport, binäres STL, Speichern, Rückgängig/Wiederholen und Wiederherstellung. Ein eigener Test lädt den Produktionsbuild von einem rein statischen Host unter `/formraum/`, schaltet das Netzwerk aus, lädt neu und modelliert/exportiert offline. Zusätzliche Tests prüfen Projektverwaltung, Migration, Speicherkonflikte, Speicherplatzfehler und die vollständige MCP-Verbindung über STDIO einschließlich Revisionen, Rückgängig, Ansichtsbild, Origin-/Code-Prüfung und einer HTTPS-Browser-Origin. Weitere Tests prüfen die analytischen Volumina aller Grundformen, Bohrkörper-Export, boolesche Operationen, gedrehte/skaliert referenzierte Skizzen, Maßfestlegung beim Zeichnen, ungültige Maße, parametrierte Vielecke und das Auflösen transformierter Kombinationen. CI führt dieselben Prüfungen aus.
 
 `backend.py`, `backendqa.py` und `backend_reference_qa.py` bleiben als historische FreeCAD-Referenz erhalten. Sie gehören nicht zur Browser-Anwendung und werden weder gestartet noch ausgeliefert.
 
