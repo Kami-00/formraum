@@ -13,3 +13,9 @@
 .sketch-types{flex-wrap:wrap}.sketch-types button{flex:1 0 40%}.locked-dimension{font-size:10px;color:#738894;margin:0 0 13px}.locked-dimension input{width:13px;height:13px}.dimension-layer input:focus{outline:2px solid #13a99c;outline-offset:2px}
 
 #shape-library{max-height:360px}#shape-library button{gap:0;padding:3px 3px 8px}#shape-library img{display:block;width:100%;height:58px;object-fit:contain;pointer-events:none}#shape-library button:hover img{transform:scale(1.06)}@media(max-width:760px){#shape-library{max-height:210px}#shape-library button{padding:2px}#shape-library img{height:34px}}
+
+.placement-row{display:grid;grid-template-columns:1.15fr 1fr;gap:8px}.placement-row select{width:100%;padding:8px 5px;border:1px solid var(--line);border-radius:5px;background:#fff;font-size:11px;color:var(--ink)}.input-unit input:disabled{background:#eef2f4;color:#8d9ca3}.placement-row .field{min-width:0}
+
+.contour-list{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}.contour-list button{font-size:11px;border:1px solid var(--line);border-radius:5px;padding:7px}.contour-list button.active{background:var(--accent);border-color:var(--teal)}.field select{width:100%;padding:8px;border:1px solid var(--line);border-radius:5px;background:white;color:var(--ink)}
+
+.sketch-help{font-size:11px;color:#6c818b;margin:5px 0 14px}.sketch-help summary{cursor:pointer}.sketch-help p{margin-top:8px}

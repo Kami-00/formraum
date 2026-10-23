@@ -3,6 +3,7 @@ import {
   measureVolume, measureArea, measureShapeLinearProperties,
   importSTEP, exportSTEP, makeCompound,
 } from 'replicad';
+import {positionedCenter} from './sketch-position.js';
 import {SHAPES} from './shapes.js';
 
 const EPS=1e-7, MAX_FILE=25*1024*1024;
@@ -26,6 +27,25 @@ function frame(face){
   const axis=Math.abs(normal[0])<.9?[1,0,0]:[0,1,0];
   const u=unit(add(axis,mul(normal,-dot(axis,normal))));
   return {origin,normal,u,v:unit(cross(normal,u))};
+}
+// Accept actual rectangular outer wires only, never a bounding box of a curved face.
+function rectangleBounds(face,f){
+ const wire=face.clone().outerWire(),edges=wire.edges;
+ try{
+  if(edges.length!==4||edges.some(e=>e.geomType!=='LINE'))return null;
+  const segments=edges.map(e=>[takeVector(e.startPoint),takeVector(e.endPoint)].map(p=>{const d=add(p,mul(f.origin,-1));return [dot(d,f.u),dot(d,f.v)];}));
+  const points=segments.flat(),min=[0,1].map(i=>Math.min(...points.map(p=>p[i]))),max=[0,1].map(i=>Math.max(...points.map(p=>p[i])));
+  const tolerance=Math.max(max[0]-min[0],max[1]-min[1],1)*1e-7;
+  if(max.some((v,i)=>v-min[i]<tolerance))return null;
+  const near=(a,b)=>Math.abs(a-b)<tolerance;
+  const sides=new Set();
+  for(const [a,b] of segments){
+   if(near(a[0],b[0])&&(near(a[0],min[0])||near(a[0],max[0]))&&near(Math.min(a[1],b[1]),min[1])&&near(Math.max(a[1],b[1]),max[1]))sides.add(near(a[0],min[0])?'left':'right');
+   else if(near(a[1],b[1])&&(near(a[1],min[1])||near(a[1],max[1]))&&near(Math.min(a[0],b[0]),min[0])&&near(Math.max(a[0],b[0]),max[0]))sides.add(near(a[1],min[1])?'bottom':'top');
+   else return null;
+  }
+  return sides.size===4?{min,max}:null;
+ }finally{edges.forEach(e=>e.delete());wire.delete();}
 }
 const geometryNames={PLANE:'Plane',CYLINDER:'Cylinder',CONE:'Cone',SPHERE:'Sphere',TORUS:'Toroid',LINE:'Line',CIRCLE:'Circle',ELLIPSE:'Ellipse',BSPLINE_CURVE:'BSplineCurve',BSPLINE_SURFACE:'BSplineSurface'};
 function reference(entity,bb,kind){
@@ -104,6 +124,25 @@ export function createKernel(oc){
     finally{check.delete();solids.forEach(s=>s.delete());}
     return shape;
   }
+  function sketchTool(profiles,makePrism){
+    if(!Array.isArray(profiles)||!profiles.length||profiles.length>12)fail('Eine Skizze benötigt 1 bis 12 Konturen.');
+    const solids=[],holes=[];let result;
+    try{
+      for(const profile of profiles){
+        object(profile,'Kontur');if(profile.role!=null&&!['solid','hole'].includes(profile.role))fail('Unbekannte Konturrolle.');
+        (profile.role==='hole'?holes:solids).push(makePrism(profile));
+      }
+      if(!solids.length)fail('Mindestens eine normale Kontur ist erforderlich. Für Bohrungen normale Kreise zeichnen und Ausschneiden wählen.');
+      result=solids[0].clone();
+      for(const solid of solids.slice(1)){const next=result.fuse(solid);result.delete();result=next;}
+      for(const hole of holes){
+        const before=measureVolume(result),next=result.cut(hole);result.delete();result=next;
+        if(Math.abs(measureVolume(result)-before)<EPS)fail('Eine Aussparung muss eine normale Kontur überlappen.');
+      }
+      if(measureVolume(result)<=EPS)fail('Die Aussparungen entfernen die gesamte Skizze.');
+      const ready=result;result=null;return ready;
+    }finally{result?.delete();solids.forEach(p=>p.delete());holes.forEach(p=>p.delete());}
+  }
   async function buildObject(spec,depth=0,keepLocal=false,budget={count:0}){
     if(++budget.count>150)fail('Maximal 150 Ausgangskörper einschließlich Kombinationen möglich.');
     if(depth>8)fail('Maximal acht verschachtelte Kombinationen möglich.');
@@ -140,7 +179,11 @@ export function createKernel(oc){
       }
       else if(spec.kind==='profile'){
         const plane=spec.plane??'XY';if(!['XY','XZ','YZ'].includes(plane))fail('Unbekannte Skizzenebene.');
-        shape=profileDrawing(object(spec.profile,'Skizze')).rotate(number(spec.profile.angle??0,'Skizzenwinkel')).sketchOnPlane(plane).extrude(number(params.height??10,'Höhe',.01));
+        const multiple=spec.contours!=null;if(multiple&&!Array.isArray(spec.contours))fail('Konturliste erwartet.');
+        shape=sketchTool([object(spec.profile,'Skizze'),...(spec.contours??[])],profile=>{
+          const center=multiple?vector(profile.center??[0,0],'Konturmittelpunkt',2):[0,0];
+          return profileDrawing(profile).rotate(number(profile.angle??0,'Skizzenwinkel')).translate(center).sketchOnPlane(plane).extrude(number(params.height??10,'Höhe',.01));
+        });
       }
       else if(spec.kind==='boolean'){
         if(!['union','cut','intersect'].includes(spec.operation)||!Array.isArray(spec.operands)||spec.operands.length<2||spec.operands.length>30)fail('Eine Kombination benötigt 2 bis 30 Ausgangskörper.');
@@ -169,13 +212,18 @@ export function createKernel(oc){
             const faces=shape.faces;entities.push(...faces);
             const support=resolve(faces,feature.face,feature.reference,bb,'face');
             feature.face=support.index;feature.reference=support.reference;
-            const f=frame(support.entity),sk=object(feature.sketch,'Skizze'),center=vector(sk.center??[0,0],'Skizzenmittelpunkt',2);
-            const origin=add(f.origin,add(mul(f.u,center[0]),mul(f.v,center[1])));
-            const plane=new Plane(origin,f.u,f.normal);
-            try{
-              const drawing=profileDrawing(sk).rotate(number(sk.angle??0,'Skizzenwinkel'));
-              prism=drawing.sketchOnPlane(plane).extrude(number(feature.depth??5,'Tiefe',.01)*(feature.type==='pocket'?-1:1));
-            }finally{plane.delete();}
+            if(feature.contours!=null&&!Array.isArray(feature.contours))fail('Konturliste erwartet.');
+            if(feature.throughAll!=null&&typeof feature.throughAll!=='boolean')fail('Durch alles muss ein Wahrheitswert sein.');
+            const depth=feature.type==='pocket'&&feature.throughAll?Math.hypot(...bb.max.map((v,i)=>v-bb.min[i]))+1:number(feature.depth??5,'Tiefe',.01);
+            const f=frame(support.entity),rect=rectangleBounds(support.entity,f);feature.supportRectangle=!!rect;
+            prism=sketchTool([object(feature.sketch,'Skizze'),...(feature.contours??[])],sk=>{
+              vector(sk.center??[0,0],'Skizzenmittelpunkt',2);
+              const center=sk.constraints?positionedCenter(sk,rect):(sk.center??[0,0]);
+              sk.center=vector(center,'Skizzenmittelpunkt',2);
+              const origin=add(f.origin,add(mul(f.u,center[0]),mul(f.v,center[1]))),plane=new Plane(origin,f.u,f.normal);
+              try{return profileDrawing(sk).rotate(number(sk.angle??0,'Skizzenwinkel')).sketchOnPlane(plane).extrude(depth*(feature.type==='pocket'?-1:1));}
+              finally{plane.delete();}
+            });
             const before=measureVolume(shape);
             next=feature.type==='extrude'?shape.fuse(prism):shape.cut(prism);
             validate(next);
@@ -223,7 +271,7 @@ export function createKernel(oc){
     const bb=bounds(shape),faces=shape.faces,edges=shape.edges;
     const local=shape._local||shape,localBB=bounds(local),localFaces=local.faces,localEdges=local.edges;
     const rotation=spec.rotation??[0,0,0],position=spec.position??[0,0,0],scale=spec.scale??1;
-    const worldFrame=face=>{const f=frame(face);return {origin:add(rotatePoint(mul(f.origin,scale),rotation),position),normal:rotatePoint(f.normal,rotation),u:rotatePoint(f.u,rotation),v:rotatePoint(f.v,rotation)};};
+    const worldFrame=face=>{const f=frame(face),rect=rectangleBounds(face,f);return {sketchBounds:rect?{min:mul(rect.min,scale),max:mul(rect.max,scale)}:null,origin:add(rotatePoint(mul(f.origin,scale),rotation),position),normal:rotatePoint(f.normal,rotation),u:rotatePoint(f.u,rotation),v:rotatePoint(f.v,rotation)};};
     try{
       const mesh={vertices:[],triangles:[],faceIds:[]};
       const faceData=faces.map((face,i)=>{
