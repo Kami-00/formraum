@@ -2,9 +2,10 @@
 <html lang="de">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Formraum — Lokales CAD</title>
+  <link rel="manifest" href="./manifest.webmanifest"><meta name="theme-color" content="#0d857d">
+  <title>Formraum — Browser-CAD</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%230d857d' d='m16 2 13 7v14l-13 7L3 23V9z'/%3E%3Cpath fill='none' stroke='white' stroke-width='2' d='m4 9 12 7 12-7M16 16v13'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
 <svg class="sprite" xmlns="http://www.w3.org/2000/svg"><defs>
@@ -35,9 +36,9 @@
 </defs></svg>
 
 <header class="topbar">
-  <a class="brand" href="/" title="Formraum"><svg><use href="#i-box"/></svg><strong>formraum<span>.</span></strong></a>
+  <a class="brand" href="./" title="Formraum"><svg><use href="#i-box"/></svg><strong>formraum<span>.</span></strong></a>
   <span class="header-separator"></span><input id="project-name" aria-label="Projektname" value="Mein Bauteil" maxlength="70">
-  <span class="local-badge"><i></i> Lokal auf deinem Rechner</span>
+  <span class="local-badge"><i></i> CAD direkt im Browser</span>
   <div class="file-actions">
     <button class="icon-button" id="undo" title="Rückgängig · Strg Z" aria-label="Rückgängig"><svg><use href="#i-undo"/></svg></button>
     <button class="icon-button" id="redo" title="Wiederholen · Strg Y" aria-label="Wiederholen"><svg><use href="#i-redo"/></svg></button>
@@ -57,7 +58,7 @@
   <div class="shape-buttons"><button id="add-box"><svg><use href="#i-box"/></svg>Quader</button><button id="add-cylinder"><svg><use href="#i-cylinder"/></svg>Zylinder</button></div>
   <div id="body-list" class="body-list"></div>
   <div class="history-heading">MODELLSCHRITTE</div><div id="feature-list" class="feature-list"></div>
-  <div class="left-footer"><button id="new-project" class="quiet-button"><svg><use href="#i-plus"/></svg>Neues Projekt</button><span>Prototyp 0.1 · Maße in mm</span></div>
+  <div class="left-footer"><button id="new-project" class="quiet-button"><svg><use href="#i-plus"/></svg>Neues Projekt</button><span>Browser-Version 0.2 · Maße in mm</span></div>
  </aside>
 
  <main class="viewport-wrap">
@@ -79,9 +80,9 @@
 
  <aside class="right-panel"><div id="inspector"></div></aside>
 </div>
-<footer class="statusbar"><span><i class="connection-dot" id="connection-dot"></i><span id="status">Verbindung wird hergestellt …</span></span><span id="selection-status">Keine Auswahl</span><span id="autosave-status">Projekt wird nur lokal gespeichert</span></footer>
+<footer class="statusbar"><span><i class="connection-dot" id="connection-dot"></i><span id="status">CAD-Kern wird geladen …</span></span><span id="selection-status">Keine Auswahl</span><span id="autosave-status">Projekt wird nur lokal gespeichert</span></footer>
 <div id="toast" role="status" hidden></div>
 <input type="file" id="project-file" accept=".json,.formraum" hidden>
-<dialog id="help-dialog"><button class="icon-button close-dialog" aria-label="Schließen"><svg><use href="#i-close"/></svg></button><span class="eyebrow">FORMRAUM</span><h2>Direkt am Bauteil arbeiten.</h2><ol><li><strong>Körper auswählen</strong><p>Klicke auf ein Bauteil. Rechts findest du Maße und Position. Mit „Maße übernehmen“ berechnest du die Änderung.</p></li><li><strong>Auf einer Fläche zeichnen</strong><p>Klicke eine ebene Fläche an und wähle „Skizze“. Ziehe ein Rechteck oder einen Kreis auf. Gib Höhe oder Tiefe ein und wähle Aufbauen oder Ausschneiden.</p></li><li><strong>Kanten bearbeiten</strong><p>Wähle Rundung oder Fase und klicke die gewünschten Kanten an. Trage den Radius oder das Fasenmaß ein.</p></li></ol><div class="help-note">Rechte Maustaste dreht die Ansicht, das Mausrad zoomt. Strg Z macht den letzten Schritt rückgängig. Projekte und Exporte bleiben auf deinem Rechner.</div><button class="primary close-dialog">Los geht’s</button></dialog>
-<script type="module" src="/app.js"></script>
+<dialog id="help-dialog"><button class="icon-button close-dialog" aria-label="Schließen"><svg><use href="#i-close"/></svg></button><span class="eyebrow">FORMRAUM</span><h2>Direkt am Bauteil arbeiten.</h2><ol><li><strong>Körper auswählen</strong><p>Klicke auf ein Bauteil. Rechts findest du Maße und Position. Mit „Maße übernehmen“ berechnest du die Änderung.</p></li><li><strong>Auf einer Fläche zeichnen</strong><p>Klicke eine ebene Fläche an und wähle „Skizze“. Ziehe ein Rechteck oder einen Kreis auf. Gib Höhe oder Tiefe ein und wähle Aufbauen oder Ausschneiden.</p></li><li><strong>Kanten bearbeiten</strong><p>Wähle Rundung oder Fase und klicke die gewünschten Kanten an. Trage den Radius oder das Fasenmaß ein.</p></li></ol><div class="help-note">Rechte Maustaste dreht die Ansicht, das Mausrad zoomt. Strg Z macht den letzten Schritt rückgängig. Projekte und Exporte bleiben auf deinem Rechner. Nach dem ersten vollständigen Laden ist die Anwendung auch offline verfügbar.</div><p class="help-note">Geometrie: Open CASCADE / WebAssembly und Replicad. <a href="https://github.com/Kami-00/formraum" target="_blank" rel="noopener">Quellcode</a> · <a href="./licenses/opencascade.txt" target="_blank">Open-CASCADE-Lizenz</a> · <a href="./licenses/replicad.txt" target="_blank">Replicad-Lizenz</a> · <a href="./licenses/three.txt" target="_blank">Three.js-Lizenz</a></p><button class="primary close-dialog">Los geht’s</button></dialog>
+<script type="module" src="./app.js"></script>
 </body></html>
