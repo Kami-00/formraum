@@ -478,7 +478,7 @@ $('#inspector').addEventListener('input',event=>{
 });
 $('#inspector').addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('input')&&!sketch){event.preventDefault();selectedFeature>=0?applyFeature():applyDimensions();}});
 $('#add-box').onclick=()=>addBody('box');$('#add-cylinder').onclick=()=>addBody('cylinder');
-$('#shape-library').innerHTML=Object.entries(SHAPES).filter(([kind])=>!['box','cylinder'].includes(kind)).map(([kind,s])=>`<button data-add-shape="${kind}" title="${s.name}" aria-label="${s.name}"><span style="color:${s.color}" aria-hidden="true">${s.symbol}</span>${s.name}</button>`).join('');
+$('#shape-library').innerHTML=Object.entries(SHAPES).filter(([kind])=>!['box','cylinder'].includes(kind)).map(([kind,s])=>`<button data-add-shape="${kind}" title="${s.name}" aria-label="${s.name}"><img src="./shapes/${kind}.png" alt="" width="128" height="96" draggable="false">${s.name}</button>`).join('');
 $('#plane-sketch').onclick=()=>startPlaneSketch();
 $('#undo').onclick=undo;$('#redo').onclick=redo;$('#fit-view').onclick=()=>fitView();
 $('#save-project').onclick=saveProject;$('#open-project').onclick=()=>$('#project-file').click();
