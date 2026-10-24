@@ -1,5 +1,8 @@
 // Shared catalogue: the UI and CAD kernel use the same parameter defaults.
 export const SHAPES={
+ gear:{name:'Zahnrad',symbol:'⚙',color:'#d6ad66',params:{module:1,teeth:20,height:6,bore:5},fields:[['module','Modul'],['teeth','Zähne'],['height','Höhe'],['bore','Bohrungsdurchmesser']]},
+ thread:{name:'Gewindestange',symbol:'▥',color:'#91a7c0',params:{diameter:10,pitch:1.5,height:12},fields:[['diameter','Nenndurchmesser'],['pitch','Steigung'],['height','Höhe']]},
+
  box:{name:'Quader',symbol:'▱',color:'#67aba9',params:{width:30,depth:25,height:15},fields:[['width','Breite · X'],['depth','Tiefe · Y'],['height','Höhe · Z']]},
  cylinder:{name:'Zylinder',symbol:'▥',color:'#b1a3c9',params:{radius:12,height:25},fields:[['radius','Radius'],['height','Höhe']]},
  sphere:{name:'Kugel',symbol:'●',color:'#e3af70',params:{radius:12},fields:[['radius','Radius']]},

@@ -1,9 +1,10 @@
 import {
-  makeBox, makeCylinder, makeSphere, draw, drawRectangle, drawCircle, drawEllipse, drawPolysides, cast, Plane, EdgeFinder,
+  makeBox, makeCylinder, makeSphere, draw, drawRectangle, drawCircle, drawEllipse, drawPolysides, cast, Plane, EdgeFinder, FaceFinder,
   measureVolume, measureArea, measureShapeLinearProperties,
   importSTEP, exportSTEP, makeCompound,
 } from 'replicad';
 import {positionedCenter} from './sketch-position.js';
+import {gear,thread,convexHull} from './mechanical.js';
 import {SHAPES} from './shapes.js';
 
 const EPS=1e-7, MAX_FILE=25*1024*1024;
@@ -149,7 +150,8 @@ export function createKernel(oc){
     object(spec,'Körper');const params=object(spec.params??{},'Maße');let shape,local;
     const p=key=>number(params[key]??SHAPES[spec.kind]?.params[key],key,key==='topRadius'?0:.005);
     try{
-      if(spec.kind==='box'||spec.kind==null){const w=number(params.width??30,'Breite',.01),d=number(params.depth??20,'Tiefe',.01),h=number(params.height??10,'Höhe',.01);shape=makeBox([-w/2,-d/2,0],[w/2,d/2,h]);}
+      if(spec.kind==='gear'||spec.kind==='thread'){const values=Object.fromEntries(Object.entries(SHAPES[spec.kind].params).map(([key,value])=>[key,number(params[key]??value,key,key==='bore'?0:.005)]));shape=spec.kind==='gear'?gear(values):thread(values);}
+      else if(spec.kind==='box'||spec.kind==null){const w=number(params.width??30,'Breite',.01),d=number(params.depth??20,'Tiefe',.01),h=number(params.height??10,'Höhe',.01);shape=makeBox([-w/2,-d/2,0],[w/2,d/2,h]);}
       else if(spec.kind==='cylinder')shape=makeCylinder(number(params.radius??10,'Radius',.005),number(params.height??10,'Höhe',.01));
       else if(spec.kind==='sphere')shape=makeSphere(p('radius')).translateZ(p('radius'));
       else if(spec.kind==='cone'){
@@ -186,17 +188,18 @@ export function createKernel(oc){
         });
       }
       else if(spec.kind==='boolean'){
-        if(!['union','cut','intersect'].includes(spec.operation)||!Array.isArray(spec.operands)||spec.operands.length<2||spec.operands.length>30)fail('Eine Kombination benötigt 2 bis 30 Ausgangskörper.');
+        if(!['union','cut','intersect','hull'].includes(spec.operation)||!Array.isArray(spec.operands)||spec.operands.length<2||spec.operands.length>30)fail('Eine Kombination benötigt 2 bis 30 Ausgangskörper.');
         const parts=[];
         try{
           for(const operand of spec.operands)parts.push(await buildObject(operand,depth+1,false,budget));
-          shape=parts[0].clone();
+          if(spec.operation==='hull')shape=convexHull(parts);
+          else{shape=parts[0].clone();
           for(const other of parts.slice(1)){
             const before=measureVolume(shape),next=spec.operation==='union'?shape.fuse(other):spec.operation==='cut'?shape.cut(other):shape.intersect(other);
             shape.delete();shape=next;validate(shape);
             if(spec.operation!=='union'&&Math.abs(measureVolume(shape)-before)<EPS)fail('Die Körper überlappen sich nicht oder ändern das Volumen nicht.');
           }
-        }finally{parts.forEach(part=>part.delete());}
+        }}finally{parts.forEach(part=>part.delete());}
       }
       else if(spec.kind==='imported')shape=await importSTEP(decodeSTEP(spec.sourceBase64));
       else fail('Unbekannter Grundkörper.');
@@ -228,6 +231,13 @@ export function createKernel(oc){
             next=feature.type==='extrude'?shape.fuse(prism):shape.cut(prism);
             validate(next);
             if(Math.abs(measureVolume(next)-before)<EPS)fail('Skizze berührt den Körper nicht oder ändert kein Volumen.');
+          }else if(feature.type==='shell'){
+            const thickness=number(feature.thickness,'Wandstärke',.01),faces=shape.faces;entities.push(...faces);
+            if(feature.closed!=null&&typeof feature.closed!=='boolean')fail('Geschlossen muss ein Wahrheitswert sein.');
+            const selected=feature.closed?null:resolve(faces,feature.face,feature.reference,bb,'face');if(selected){feature.face=selected.index;feature.reference=selected.reference;}
+            const finder=new FaceFinder().inList(selected?[selected.entity]:[]);let inner;
+            try{inner=shape.shell({filter:finder,thickness});if(feature.closed)next=shape.cut(inner);else{next=inner;inner=null;}}finally{finder.delete();inner?.delete();}
+            validate(next);if(measureVolume(next)>=measureVolume(shape)-EPS)fail('Wandung konnte nicht nach innen erzeugt werden.');
           }else if(feature.type==='fillet'||feature.type==='chamfer'){
             const ids=feature.edges;
             if(!Array.isArray(ids)||!ids.length||new Set(ids).size!==ids.length)fail('Mindestens eine Kante auswählen; keine doppelten Kanten.');

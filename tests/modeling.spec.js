@@ -7,7 +7,7 @@ const saved=page=>page.evaluate(()=>JSON.parse(localStorage.getItem('formraum.pr
 test.beforeEach(async({page})=>{await page.goto('/');await expect(page.locator('#status')).toContainText('Geometrie bereit',{timeout:60000});});
 
 test('ten solid primitives have analytical volumes and reject invalid geometry',async({page})=>{
- const objects=Object.entries(SHAPES).map(([kind,s])=>({id:kind,kind,params:s.params}));
+ const objects=Object.entries(SHAPES).filter(([k])=>!['gear','thread'].includes(k)).map(([kind,s])=>({id:kind,kind,params:s.params}));
  const result=await call(page,project(objects));expect(result.error).toBeUndefined();
  const expected=[11250,Math.PI*144*25,4/3*Math.PI*12**3,Math.PI*144*25/3,Math.PI*(144-64)*25,2*Math.PI**2*15*16,7500,25*25*25/3,3*Math.sqrt(3)/2*14**2*20,Math.PI*64*14+4/3*Math.PI*8**3];
  result.objects.forEach((m,i)=>{expect(m.valid).toBe(true);expect(m.volume).toBeCloseTo(expected[i],3);expect(m.bounds.min[2]).toBeCloseTo(0,5);});
