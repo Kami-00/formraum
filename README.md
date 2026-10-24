@@ -100,3 +100,11 @@ Die Tests führen den tatsächlichen WebAssembly-Kern im Browser aus. Sie prüfe
 - [Three.js](https://github.com/mrdoob/three.js): Darstellung und Kamerasteuerung (MIT).
 
 Lizenztexte sind unter `web/public/licenses/` enthalten und über die Hilfe der Anwendung erreichbar. Versionen sind in `package-lock.json` festgeschrieben.
+
+### Mechanische Formen, Wandung und Zeichenhilfen (0.5)
+
+- **Zahnrad** unter Weitere Formen: Modul, 18–80 Zähne, Höhe und Bohrung. Geradverzahnung mit 20° Druckwinkel und polygonal angenäherten Evolventenflanken; vereinfachter Zahnfuß, keine normgeprüfte Verzahnung. Die Grundmaße folgen der [KHK-Referenz](https://khkgears.net/gear-knowledge/gear-technical-reference/calculation-gear-dimensions/).
+- **Gewindestange**: Nenndurchmesser, Steigung und Höhe, maximal 24 Windungen. Echtes Rechtsgewinde als CAD-Geometrie mit vereinfachtem Profil, kein normgeprüftes ISO-Gewinde. Für Innengewinde eine passende Gewindestange durch den Grundkörper positionieren, als Bohrung markieren und beide gruppieren. Spiel über den Durchmesser des Schneidkörpers einstellen.
+- **Hull**: mehrere Körper auswählen und **Hull · konvexe Hülle** wählen. Verbindet auch getrennte Körper. Die konvexe Hülle wird aus triangulierten Oberflächen berechnet; Rundungen werden facettiert angenähert, nicht analytisch umhüllt. Maximal 6000 Stützpunkte / 2500 Hüllflächen. Ausgangskörper bleiben bearbeitbar.
+- **Wandung**: eine Fläche auswählen, Wandstärke eingeben und **Wandung anwenden**. Die gewählte Fläche wird entfernt, die übrigen Wände nach innen versetzt. **Geschlossen aushöhlen** erzeugt stattdessen einen geschlossenen inneren Hohlraum. Wandstärke später im Modellverlauf ändern. Geometrisch unmögliche Wandungen werden abgewiesen; das gespeicherte Modell bleibt erhalten.
+- **Zeichenhilfen**: beim Aufziehen werden Ursprung, rechteckige Außenkanten, Flächenmitten und Mittelpunkte anderer Konturen gefangen. Orange Hilfslinien zeigen die Ausrichtung. Nahezu quadratische Rechtecke / kreisförmige Ellipsen und gleiche Radien werden beim Aufziehen vorgeschlagen. **Alt** unterdrückt Fanghilfen und Raster. Dies sind vorübergehende Zeichenhilfen, kein vollständiger SolidWorks-Constraint-Solver; dauerhafte Maße und Kantenbezüge werden weiterhin ausdrücklich gesetzt.
