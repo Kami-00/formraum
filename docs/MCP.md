@@ -83,7 +83,7 @@ Der Sitzungscode wird bei jedem Neustart der Brücke neu erzeugt, nicht im Brows
 | `formraum_open_project` | Ein gespeichertes Projekt öffnen |
 | `formraum_undo` | Letzten Modellschritt rückgängig machen |
 
-Jede Änderung benötigt die beim letzten Lesen erhaltene **Projekt-ID und Revision**. Falls du zwischenzeitlich etwas änderst oder das Projekt wechselst, wird ein veralteter Schreibversuch abgewiesen. Während einer Skizze, beim Bearbeiten eines Eingabefelds oder während einer Berechnung führt die KI keine Änderungen aus. Nach einem Fehler muss der Client den Stand erneut lesen. Ein Fehler ist kein Anlass, dieselbe Änderung blind zu wiederholen.
+Jede Änderung benötigt die beim letzten Lesen erhaltene **Projekt-ID und Revision**. Falls du zwischenzeitlich etwas änderst oder das Projekt wechselst, wird ein veralteter Schreibversuch abgewiesen. Während einer Skizze, beim Bearbeiten eines Eingabefelds oder während einer Berechnung führt die KI keine Änderungen aus. Noch nicht übernommene Maß- und Auswahlfelder sind auch nach einem Fokuswechsel geschützt; zuerst **Maße übernehmen** beziehungsweise die Bearbeitung abbrechen. Nach einem Fehler muss der Client den Stand erneut lesen. Ein Fehler ist kein Anlass, dieselbe Änderung blind zu wiederholen.
 
 Die Brücke führt keinen übermittelten Programmcode aus und liest keine beliebigen Dateien auf dem Rechner. Sie gewährt nach dem Koppeln Zugriff auf die Projektliste und das aktive Projekt einschließlich importierter STEP-Quelldaten; über Projektwechsel können auch andere Projekte dieses Browserprofils geöffnet werden. Dein MCP-Client kann diese Daten an seinen KI-Anbieter senden. Ohne MCP-Verbindung werden keine Projektdaten aus Formraum übertragen.
 

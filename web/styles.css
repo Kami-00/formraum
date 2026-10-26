@@ -19,3 +19,4 @@
 .contour-list{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}.contour-list button{font-size:11px;border:1px solid var(--line);border-radius:5px;padding:7px}.contour-list button.active{background:var(--accent);border-color:var(--teal)}.field select{width:100%;padding:8px;border:1px solid var(--line);border-radius:5px;background:white;color:var(--ink)}
 
 .sketch-help{font-size:11px;color:#6c818b;margin:5px 0 14px}.sketch-help summary{cursor:pointer}.sketch-help p{margin-top:8px}
+.project-recovery{border-top:1px solid var(--line);margin-top:18px;padding-top:12px}.project-recovery h3{font-size:13px}.project-recovery p,.recovery-card>span{font-size:11px;line-height:1.6;color:#718692;overflow-wrap:anywhere}.recovery-card{padding:10px;border:1px solid #e4d5ac;border-radius:7px;margin:8px 0;background:#fffdf5}.recovery-card .subtle-button{width:auto;margin-top:7px}

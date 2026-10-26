@@ -1,7 +1,9 @@
 import {suggestPoint,suggestSize} from './sketch-suggestions.js';
+import {draggedProfileBounds} from './sketch-drag.js';
 import {profileExtents,positionedCenter} from './sketch-position.js';
 import {SHAPES,shapeName,sketchName,isRadial} from './shapes.js';
 import {ProjectStore,PROJECT_PREFIX} from './project-store.js';
+import {SketchDraftStore,validateDraft,sameReference} from './sketch-drafts.js';
 import {setupSession} from './session.js';
 import {calculate} from './cad-client.js';
 import * as THREE from './vendor/three.module.js';
@@ -16,6 +18,8 @@ const fmt = (n,d=2) => new Intl.NumberFormat('de-DE',{maximumFractionDigits:d}).
 const vec = a => new THREE.Vector3(...a);
 const uid = () => crypto.randomUUID();
 const library=new ProjectStore();
+const drafts=new SketchDraftStore();
+let draftBase=null,draftId=null,draftSourceId=null,draftTimer,lastDraftSignature='',draftPersisted=true,inspectorDirty=false;
 let activeProjectId=null,projectRevision=0,lastCommitError='',sessionReady=false;
 const makeDefault = () => ({version:1,name:'Mein Bauteil',objects:[{id:uid(),name:'Quader 01',kind:'box',params:{width:40,depth:30,height:12},position:[0,0,0],features:[],color:'#67aba9'}]});
 let project=makeDefault(), models=[], selectedId=project.objects[0].id, selectedFace=null, selectedEdges=new Set(), selectedFeature=-1;
@@ -130,8 +134,9 @@ function toast(message,error=false){clearTimeout(toastTimer);const t=$('#toast')
 function setBusy(value){busy=value;document.body.classList.toggle('busy',value);$('#busy-badge').hidden=!value;updateUndo();if(sketch)syncSketchInputs();}
 function setStatus(message,ok=true){$('#status').textContent=message;$('#connection-dot').classList.toggle('off',!ok);}
 function updateUndo(){$('#undo').disabled=busy||!undoStack.length;$('#redo').disabled=busy||!redoStack.length;}
-async function commit(next,{record=true,fit=false,message='',entry=null,create=false}={}){
+async function commit(next,{record=true,fit=false,message='',entry=null,create=false,fromSketch=false}={}){
  if(busy){lastCommitError='Eine Berechnung läuft bereits.';return false;}
+ if(sketch&&!fromSketch){lastCommitError='Bitte die Skizze zuerst aufbauen, ausschneiden oder beenden.';toast(lastCommitError,true);return false;}
  setBusy(true);const n=++requestVersion;lastCommitError='';
  try{
   const result=await calculate('model',{project:next});if(n!==requestVersion)return false;
@@ -142,7 +147,7 @@ async function commit(next,{record=true,fit=false,message='',entry=null,create=f
   project=clone(result.project);models=result.objects;
   if(!project.objects.some(o=>o.id===selectedId))selectedId=project.objects[0]?.id||null;
   selectedFace=null;selectedEdges.clear();hoverEdge=null;selectedFeature=-1;selectedContour=0;selectedBodies=new Set(selectedId?[selectedId]:[]);
-  renderBodies();renderPanels();renderProjectList();$('#autosave-status').textContent='Projekt im Browser gespeichert';
+  inspectorDirty=false;renderBodies();renderPanels();renderProjectList();$('#autosave-status').textContent='Projekt im Browser gespeichert';
   setStatus(`${models.length} Körper · Geometrie bereit`);
   if(fit)fitView();if(message)toast(message);return true;
  }catch(error){lastCommitError=error.message;toast(error.message,true);setStatus('Änderung verworfen · letzter gültiger Stand erhalten',true);return false;}
@@ -150,19 +155,24 @@ async function commit(next,{record=true,fit=false,message='',entry=null,create=f
 }
 function renderProjectList(){
  const root=$('#project-library');if(!root)return;
- try{root.innerHTML=library.list().map(e=>`<div class="project-card ${e.id===activeProjectId?'current':''}"><button data-open-saved="${esc(e.id)}"><strong>${esc(e.name)}</strong><span>${e.bodies} Körper · ${esc(new Date(e.updatedAt).toLocaleString('de-DE'))}${e.id===activeProjectId?' · Aktiv':''}</span></button><button class="icon-button" data-duplicate-project="${esc(e.id)}" title="Projekt duplizieren" aria-label="${esc(e.name)} duplizieren">＋</button>${e.id!==activeProjectId?`<button class="icon-button" data-delete-project="${esc(e.id)}" title="Projekt löschen" aria-label="${esc(e.name)} löschen">×</button>`:''}</div>`).join('');}
+ try{
+  root.innerHTML=library.list().map(e=>`<div class="project-card ${e.id===activeProjectId?'current':''}"><button data-open-saved="${esc(e.id)}"><strong>${esc(e.name)}</strong><span>${e.bodies} Körper · ${esc(new Date(e.updatedAt).toLocaleString('de-DE'))}${e.id===activeProjectId?' · Aktiv':''}</span></button><button class="icon-button" data-duplicate-project="${esc(e.id)}" title="Projekt duplizieren" aria-label="${esc(e.name)} duplizieren">＋</button>${e.id!==activeProjectId?`<button class="icon-button" data-delete-project="${esc(e.id)}" title="Projekt löschen" aria-label="${esc(e.name)} löschen">×</button>`:''}</div>`).join('');
+  const damaged=library.damaged(),savedDrafts=drafts.list();
+  if(damaged.length)root.insertAdjacentHTML('beforeend',`<section class="project-recovery" aria-label="Beschädigte Sicherungen"><h3>Beschädigte Sicherungen</h3><p>Diese Einträge bleiben unverändert erhalten. Gesunde Projekte kannst du weiter öffnen.</p>${damaged.map((e,i)=>`<div class="recovery-card"><span>${esc(e.id||'Alte Sicherung')} · ${esc(e.reason)}</span><button class="subtle-button" data-backup-damaged="${i}">Rohdaten sichern</button></div>`).join('')}</section>`);
+  if(savedDrafts.length)root.insertAdjacentHTML('beforeend',`<section class="project-recovery" aria-label="Skizzenentwürfe"><h3>Skizzenentwürfe</h3><p>Bei einem inzwischen geänderten Modell wird der Entwurf mit seinem ursprünglichen Modell als neues Projekt geöffnet.</p>${savedDrafts.map(d=>`<div class="recovery-card"><span>${esc(d.project.name||'Unbenannt')} · ${esc(new Date(d.updatedAt).toLocaleString('de-DE'))}</span><button class="subtle-button" data-restore-draft="${esc(d.id)}">Entwurf öffnen</button></div>`).join('')}</section>`);
+ }
  catch(error){root.textContent=error.message;}
 }
 async function openSaved(id){
  if(busy)return false;
  try{const entry=library.read(id);if(!entry)throw new Error('Projekt nicht gefunden.');
-  if(sketch)cancelSketch();tool='select';
+  if(sketch&&!cancelSketch())return false;tool='select';
   const ok=await commit(entry.project,{entry,record:false,fit:true,message:'Projekt geöffnet'});
-  if(ok)$('#projects-dialog').close();return ok;
+  if(ok){$('#projects-dialog').close();restorePreferredDraft();}return ok;
  }catch(error){lastCommitError=error.message;toast(error.message,true);return false;}
 }
 async function newProject(data={version:1,name:'Neues Bauteil',objects:[]}){
- if(busy)return false;if(sketch)cancelSketch();tool='select';
+ if(busy)return false;if(sketch&&!cancelSketch())return false;tool='select';
  const ok=await commit(data,{create:true,record:false,fit:true,message:'Projekt angelegt'});
  if(ok)$('#projects-dialog').close();return ok;
 }
@@ -187,6 +197,7 @@ function renderPanels(){
  updateToolButtons();updateUndo();
 }
 function renderInspector(){
+ inspectorDirty=false;
  const root=$('#inspector'),spec=currentSpec(),model=currentModel();
  if(sketch){renderSketchInspector();return;}
  if(selectedBodies.size>1){renderMultiInspector();return;}
@@ -258,7 +269,7 @@ function updateToolButtons(){
 function setTool(next){
  if(busy)return;
  if(next==='sketch'){startSketch();return;}
- if(sketch)cancelSketch();tool=next;selectedEdges.clear();hoverEdge=null;selectedFeature=-1;renderSelection();renderInspector();updateToolButtons();
+ if(sketch&&!cancelSketch())return;tool=next;selectedEdges.clear();hoverEdge=null;selectedFeature=-1;renderSelection();renderInspector();updateToolButtons();
 }
 function startSketch(){
  if(busy||sketch)return;
@@ -270,6 +281,7 @@ function startPlaneSketch(){
  beginSketch({id:0,origin:[0,0,0],normal:[0,0,1],u:[1,0,0],v:[0,1,0]},true);
 }
 function beginSketch(face,standalone){
+ draftBase={projectId:activeProjectId,revision:projectRevision,project:clone(project)};draftId=null;draftSourceId=null;lastDraftSignature='';draftPersisted=true;
  sketch={face,standalone,kind:'rectangle',center:[0,0],width:10,height:10,radius:5,sides:6,angle:0,depth:10,snap:1,hasDrawn:false,locks:{},invalid:{},constraints:{},distanceReference:'outline',role:'solid',throughAll:false,profiles:[],activeContour:0};tool='sketch';sketch.profiles=[captureContour()];
  savedCamera={position:camera.position.clone(),up:camera.up.clone(),target:controls.target.clone(),height:viewHeight,zoom:camera.zoom};
  const origin=vec(face.origin),normal=vec(face.normal);camera.position.copy(origin).addScaledVector(normal,200);camera.up.copy(vec(face.v));camera.lookAt(origin);controls.target.copy(origin);controls.enableRotate=false;controls.mouseButtons.RIGHT=THREE.MOUSE.PAN;
@@ -277,14 +289,67 @@ function beginSketch(face,standalone){
  grid.visible=false;axes.visible=false;$('#navigation-hint').textContent='Links ziehen: zeichnen · Rechts ziehen: verschieben · Esc: Skizze beenden';
  $('#welcome').hidden=true;renderSelection();renderSketchInspector();updateToolButtons();drawSketch();
 }
-function cancelSketch(){
- if(!sketch)return;
+function cancelSketch({discard=false}={}){
+ if(!sketch)return true;
+ clearTimeout(draftTimer);
+ if(discard){try{if(draftId)drafts.remove(draftId);if(draftSourceId)drafts.remove(draftSourceId);}catch(error){toast('Alte Entwurfssicherung konnte nicht entfernt werden. Sie bleibt zur Wiederherstellung erhalten.',true);}}
+ else if(!persistSketchDraft())return false;
+ draftBase=null;draftId=null;draftSourceId=null;lastDraftSignature='';draftPersisted=true;
  sketch=null;for(const {label} of dimensionInputs.values())label.hidden=true;tool='select';disposeGroup(sketchRoot);measureLabel.hidden=true;
  controls.enableRotate=true;controls.mouseButtons.RIGHT=THREE.MOUSE.ROTATE;grid.visible=true;axes.visible=true;
  if(savedCamera){camera.position.copy(savedCamera.position);camera.up.copy(savedCamera.up);controls.target.copy(savedCamera.target);viewHeight=savedCamera.height;camera.zoom=savedCamera.zoom;resize();camera.lookAt(controls.target);savedCamera=null;}
  controls.update();$('#navigation-hint').innerHTML='Rechts ziehen: drehen <b>·</b> Mausrad: zoomen <b>·</b> Mitte: verschieben';
- renderSelection();renderPanels();updateToolButtons();
+ renderSelection();renderPanels();updateToolButtons();return true;
 }
+function captureSketchDraft(){
+ saveContour();return validateDraft({version:1,standalone:sketch.standalone,bodyId:sketch.standalone?null:selectedId,face:clone(sketch.face),profiles:clone(sketch.profiles),activeContour:sketch.activeContour,depth:sketch.depth,snap:sketch.snap,throughAll:sketch.throughAll});
+}
+function persistSketchDraft(){
+ clearTimeout(draftTimer);if(!sketch||!draftBase)return true;
+ try{
+  const data=captureSketchDraft(),signature=JSON.stringify(data);
+  if(signature===lastDraftSignature&&draftPersisted)return true;
+  if(!data.profiles.some(p=>p.hasDrawn)){
+   if(draftId)drafts.remove(draftId);if(draftSourceId)drafts.remove(draftSourceId);
+   draftId=null;draftSourceId=null;lastDraftSignature=signature;draftPersisted=true;return true;
+  }
+  const saved=drafts.save(draftBase,data,draftId);draftId=saved.id;lastDraftSignature=signature;draftPersisted=true;
+  $('#autosave-status').textContent='Modell und Skizzenentwurf im Browser gesichert';return true;
+ }catch(error){draftPersisted=false;$('#autosave-status').textContent='Skizzenentwurf ungesichert · als Datei speichern';toast(error.message,true);return false;}
+}
+function queueSketchDraft(){
+ if(!sketch||!draftBase)return;clearTimeout(draftTimer);draftPersisted=false;draftTimer=setTimeout(persistSketchDraft,150);
+}
+function restoreSketchDraft(record){
+ const data=validateDraft(record.draft);if(sketch&&!cancelSketch())throw new Error('Bitte den aktuellen Entwurf zuerst als Datei sichern oder ausdrücklich verwerfen.');
+ let face={id:0,origin:[0,0,0],normal:[0,0,1],u:[1,0,0],v:[0,1,0]};
+ if(!data.standalone){
+  const model=models.find(m=>m.id===data.bodyId),faces=model?.faces.filter(f=>f.planar&&sameReference(f.reference,data.face.reference))||[];
+  if(faces.length!==1)throw new Error('Die Bezugsfläche des Entwurfs ist nicht eindeutig. Die Sicherung bleibt erhalten.');
+  face=clone(faces[0]);selectObject(data.bodyId,face);
+ }
+ beginSketch(face,data.standalone);
+ sketch.profiles=clone(data.profiles);sketch.activeContour=data.activeContour;
+ Object.assign(sketch,clone(sketch.profiles[data.activeContour]),{depth:data.depth,snap:data.snap,throughAll:data.throughAll});
+ draftSourceId=record.id||null;draftId=record.owner===drafts.owner?record.id:null;
+ renderSketchInspector();drawSketch();updateToolButtons();persistSketchDraft();toast('Skizzenentwurf wiederhergestellt');
+}
+function restorePreferredDraft(){
+ const saved=drafts.preferred(activeProjectId,projectRevision);if(!saved)return;
+ try{restoreSketchDraft(saved);}catch(error){toast(error.message,true);}
+}
+async function openSketchDraft(id){
+ if(busy)return;const saved=drafts.list().find(d=>d.id===id);if(!saved)return;
+ try{
+  const exists=library.list().some(e=>e.id===saved.projectId),entry=exists?library.read(saved.projectId):null;
+  let ok;if(entry?.revision===saved.revision){if(sketch&&!cancelSketch())return;tool='select';ok=await commit(entry.project,{entry,record:false,fit:true});}
+  else ok=await newProject(saved.project);
+  if(ok){restoreSketchDraft(saved);$('#projects-dialog').close();}
+ }catch(error){toast(error.message,true);}
+}
+window.addEventListener('beforeunload',event=>{
+ const saved=persistSketchDraft();if(inspectorDirty||!saved){event.preventDefault();event.returnValue='';}
+});
 function renderSketchInspector(){
  if(!sketch)return;const s=sketch;
  const dimension=(label,key,value)=>`${skField(label,key,value)}<label class="locked-dimension"><input type="checkbox" data-lock="${key}" ${s.locks[key]?'checked':''}> Maß festhalten</label>`;
@@ -318,6 +383,7 @@ function syncSketchInputs(){
 function toSketchWorld(u,v,lift=.06){return vec(sketch.face.origin).addScaledVector(vec(sketch.face.u),u).addScaledVector(vec(sketch.face.v),v).addScaledVector(vec(sketch.face.normal),lift);}
 function drawSketch(){
  disposeGroup(sketchRoot);measureLabel.hidden=true;for(const {label} of dimensionInputs.values())label.hidden=true;if(!sketch)return;
+ queueSketchDraft();
  const s=sketch,origin=vec(s.face.origin),u=vec(s.face.u),v=vec(s.face.v),normal=vec(s.face.normal);
  const model=currentModel();const size=Math.max(model?vec(model.bounds.max).sub(vec(model.bounds.min)).length():60,40);const gridStep=s.snap>0?Math.max(s.snap,1):5;
  const gridPoints=[];const extent=Math.min(Math.ceil(size/gridStep),100)*gridStep;
@@ -376,8 +442,8 @@ async function applySketch(type){
  if(s.standalone)next.objects.push({id:uid(),name:sketchName(profile.kind),kind:'profile',profile,contours,plane:'XY',params:{height:s.depth},position:[0,0,0],features:[],color:'#67aba9'});
  else spec.features.push({type,face:s.face.id,reference:s.face.reference,sketch:profile,contours,depth:s.depth/scale,...(type==='pocket'?{throughAll:s.throughAll}:{})});
  // A failed operation keeps the editable sketch and all prior geometry.
- const ok=await commit(next,{message:type==='extrude'?'Skizze aufgebaut':'Tasche ausgeschnitten'});
- if(ok){cancelSketch();selectedFace=null;if(s.standalone)selectObject(next.objects.at(-1).id);renderSelection();renderPanels();}
+ const ok=await commit(next,{fromSketch:true,message:type==='extrude'?'Skizze aufgebaut':'Tasche ausgeschnitten'});
+ if(ok){cancelSketch({discard:true});selectedFace=null;if(s.standalone)selectObject(next.objects.at(-1).id);renderSelection();renderPanels();renderProjectList();}
  else{sketch=s;tool='sketch';selectedFace=s.face;renderSketchInspector();renderSelection();drawSketch();updateToolButtons();}
 }
 
@@ -397,11 +463,10 @@ renderer.domElement.addEventListener('pointermove',event=>{
  if(drag?.kind==='sketch'&&sketch){
   const point=sketchPoint(event);if(!point)return;
   const [a,b]=drag.start,[c,d]=point;
-  if(!isRadial(sketch.kind)){if(!sketch.locks.width)sketch.width=Math.max(Math.abs(c-a),.01);if(!sketch.locks.height)sketch.height=Math.max(Math.abs(d-b),.01);sketch.center=[a+(Math.sign(c-a)||1)*sketch.width/2,b+(Math.sign(d-b)||1)*sketch.height/2];}
+  if(!isRadial(sketch.kind)){const bounds=draggedProfileBounds(drag.start,point,sketch,event.altKey?null:viewHeight/camera.zoom/viewport.clientHeight*7);sketch.width=bounds.width;sketch.height=bounds.height;sketch.center=bounds.center;if(bounds.equalSides)sketch.suggestion=sketch.kind==='ellipse'?'Kreis · gleiche Achsen':'Quadrat · gleiche Seiten';}
   else{sketch.center=[a,b];if(!sketch.locks.radius)sketch.radius=Math.max(Math.hypot(c-a,d-b),.01);}
   if(!event.altKey){
    const tolerance=viewHeight/camera.zoom/viewport.clientHeight*7,others=sketch.profiles.filter((p,i)=>i!==sketch.activeContour&&p.hasDrawn);
-   if(!isRadial(sketch.kind)&&!sketch.locks.height&&Math.abs(sketch.height-sketch.width)<=tolerance){sketch.height=sketch.width;sketch.center[1]=b+(Math.sign(d-b)||1)*sketch.height/2;sketch.suggestion=sketch.kind==='ellipse'?'Kreis · gleiche Achsen':'Quadrat · gleiche Seiten';}
    if(isRadial(sketch.kind)&&!sketch.locks.radius){const radius=suggestSize(sketch.radius,others.filter(p=>isRadial(p.kind)).map(p=>p.radius),tolerance);if(radius!=null){sketch.radius=radius;sketch.suggestion='Gleicher Radius · '+fmt(radius)+' mm';}}
   }
   $('#mode-pill').textContent=sketch.suggestion?sketch.suggestion+' · Alt: frei':'Kontur aufziehen · Alt: ohne Fanghilfen';
@@ -437,7 +502,7 @@ renderer.domElement.addEventListener('pointercancel',()=>{drag=null;groups.get(s
 controls.addEventListener('change',()=>{if(sketch?.hasDrawn)drawSketch();});
 
 async function addBody(kind){
- if(busy||!SHAPES[kind])return;if(sketch)cancelSketch();setTool('select');
+ if(busy||!SHAPES[kind])return;if(sketch&&!cancelSketch())return;setTool('select');
  const next=clone(project),bounds=projectBounds(),definition=SHAPES[kind];
  const x=next.objects.length?bounds.max.x+25:0,count=next.objects.filter(o=>o.kind===kind).length+1;
  const obj={id:uid(),name:`${definition.name} ${String(count).padStart(2,'0')}`,kind,params:clone(definition.params),position:[x,0,0],features:[],color:definition.color};
@@ -445,7 +510,10 @@ async function addBody(kind){
 }
 function download(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),20000);}
 function safeName(){return (project.name||'Bauteil').replace(/[^\p{L}\p{N} _-]/gu,'').trim().slice(0,70)||'Bauteil';}
-function saveProject(){download(new Blob([JSON.stringify(project,null,2)],{type:'application/json'}),safeName()+'.formraum.json');toast('Projektdatei gespeichert');}
+function saveProject(){
+ const data=clone(project);if(sketch){saveContour();data.sketchDraft=captureSketchDraft();persistSketchDraft();}
+ download(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),safeName()+'.formraum.json');toast(sketch?'Projekt mit Skizzenentwurf gespeichert':'Projektdatei gespeichert');
+}
 async function exportModel(kind){
  if(busy)return;setBusy(true);$('#export-menu').hidden=true;
  try{const blob=await calculate(kind==='step'?'export_step':'export_stl',{project});download(blob,safeName()+'.'+kind);toast(`${kind.toUpperCase()} exportiert`);}catch(e){toast(e.message,true);}finally{setBusy(false);}
@@ -453,28 +521,34 @@ async function exportModel(kind){
 async function openFile(file){
  if(!file||busy)return;
  if(file.size>25*1024*1024){toast('Bitte eine Datei bis 25 MB auswählen.',true);return;}
- if(sketch)cancelSketch();tool='select';
+ if(sketch&&!cancelSketch())return;tool='select';
  try{
   if(/\.(stp|step)$/i.test(file.name)){
    if(busy)return;setBusy(true);
    const base64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]);r.onerror=reject;r.readAsDataURL(file);});
    const result=await calculate('import_step',{base64,filename:file.name});
-   setBusy(false);result.project.name=file.name.replace(/\.(step|stp)$/i,'');selectedId=result.project.objects[0]?.id;await newProject(result.project);
-  }else{const data=JSON.parse(await file.text());if(!Array.isArray(data.objects))throw new Error('Diese Datei ist kein Formraum-Projekt.');await newProject(data);}
+   setBusy(false);result.project.name=file.name.replace(/\.(step|stp)$/i,'');await newProject(result.project);
+  }else{
+   const data=JSON.parse(await file.text());if(!Array.isArray(data.objects))throw new Error('Diese Datei ist kein Formraum-Projekt.');
+   const savedDraft=data.sketchDraft?validateDraft(data.sketchDraft):null;delete data.sketchDraft;
+   if(await newProject(data)&&savedDraft)restoreSketchDraft({draft:savedDraft});
+  }
  }catch(e){setBusy(false);toast(e.message||'Datei konnte nicht geöffnet werden.',true);}
 }
 async function undo(){
- if(busy||!undoStack.length)return;if(sketch)cancelSketch();
+ if(busy||!undoStack.length)return;if(sketch&&!cancelSketch())return;
  const target=undoStack[undoStack.length-1],previous=clone(project);if(await commit(target,{record:false})){undoStack.pop();redoStack.push(previous);updateUndo();}
 }
 async function redo(){
- if(busy||!redoStack.length)return;if(sketch)cancelSketch();
+ if(busy||!redoStack.length)return;if(sketch&&!cancelSketch())return;
  const target=redoStack[redoStack.length-1],previous=clone(project);if(await commit(target,{record:false})){redoStack.pop();undoStack.push(previous);updateUndo();}
 }
 
 document.addEventListener('click',async event=>{
  const button=event.target.closest('button');
  if(button?.disabled)return;
+ if(button?.dataset.backupDamaged!==undefined){const e=library.damaged()[Number(button.dataset.backupDamaged)];if(e)download(new Blob([e.raw],{type:'application/json'}),'Formraum-beschaedigte-Sicherung.json');return;}
+ if(button?.dataset.restoreDraft){await openSketchDraft(button.dataset.restoreDraft);return;}
  if(button?.dataset.openSaved){await openSaved(button.dataset.openSaved);return;}
  if(button?.dataset.duplicateProject){const entry=library.read(button.dataset.duplicateProject);if(entry){entry.project.name=(entry.project.name||'Projekt')+' Kopie';await newProject(entry.project);}return;}
  if(button?.dataset.deleteProject){const entry=library.read(button.dataset.deleteProject);if(entry&&entry.id!==activeProjectId&&confirm(`Projekt „${entry.project.name}“ aus dem Browser löschen?`)){try{await library.remove(entry.id,entry.revision);renderProjectList();}catch(e){toast(e.message,true);}}return;}
@@ -484,16 +558,16 @@ document.addEventListener('click',async event=>{
  if(button?.dataset.visibility){
   const next=clone(project),spec=next.objects.find(o=>o.id===button.dataset.visibility);spec.visible=spec.visible===false;await commit(next);return;
  }
- if(event.target.dataset.multiBody){if(sketch)cancelSketch();selectObject(event.target.dataset.multiBody,null,true);return;}
+ if(event.target.dataset.multiBody){if(sketch&&!cancelSketch())return;selectObject(event.target.dataset.multiBody,null,true);return;}
  if(button?.dataset.addShape){addBody(button.dataset.addShape);return;}
  if(button?.dataset.combine){combineSelected(button.dataset.combine);return;}
  if(button?.dataset.align){alignSelected(button.dataset.align);return;}
  if(button?.dataset.bodyRole){const next=clone(project);next.objects.find(o=>o.id===selectedId).hole=button.dataset.bodyRole==='hole';await commit(next);return;}
- const row=event.target.closest('[data-body]');if(row){if(sketch)cancelSketch();setTool('select');selectObject(row.dataset.body,null,event.shiftKey);return;}
+ const row=event.target.closest('[data-body]');if(row){if(sketch&&!cancelSketch())return;setTool('select');selectObject(row.dataset.body,null,event.shiftKey);return;}
  if(button?.dataset.removeFeature!==undefined){
   const next=clone(project),features=next.objects.find(o=>o.id===selectedId).features;const count=features.length-Number(button.dataset.removeFeature);features.splice(Number(button.dataset.removeFeature));await commit(next,{message:count>1?'Bearbeitung und nachfolgende Schritte entfernt · Strg Z zum Wiederherstellen':'Bearbeitung entfernt'});return;
  }
- const featureRow=event.target.closest('[data-feature]');if(featureRow){if(sketch)cancelSketch();tool='select';selectedFeature=Number(featureRow.dataset.feature);selectedContour=0;selectedFace=null;selectedEdges.clear();renderSelection();renderPanels();return;}
+ const featureRow=event.target.closest('[data-feature]');if(featureRow){if(sketch&&!cancelSketch())return;tool='select';selectedFeature=Number(featureRow.dataset.feature);selectedContour=0;selectedFace=null;selectedEdges.clear();renderSelection();renderPanels();return;}
  if(button?.dataset.removeEdge){selectedEdges.delete(Number(button.dataset.removeEdge));renderSelection();renderInspector();return;}
  if(button?.dataset.contour!==undefined&&sketch){switchContour(Number(button.dataset.contour));return;}
  if(button?.dataset.contourRole&&sketch){sketch.role=button.dataset.contourRole;saveContour();renderSketchInspector();drawSketch();return;}
@@ -512,7 +586,7 @@ document.addEventListener('click',async event=>{
   case 'apply-shell':applyShell();break;
   case 'apply-edge':applyEdge();break;
   case 'cancel-tool':setTool('select');break;
-  case 'cancel-sketch':cancelSketch();break;
+  case 'cancel-sketch':cancelSketch({discard:true});renderProjectList();break;
   case 'extrude':applySketch('extrude');break;
   case 'pocket':applySketch('pocket');break;
   case 'show-body':selectedFeature=-1;renderPanels();break;
@@ -522,8 +596,9 @@ document.addEventListener('click',async event=>{
  if(!event.target.closest('.export-wrap'))$('#export-menu').hidden=true;
 });
 $('#inspector').addEventListener('input',event=>{
+ if(!sketch&&!event.target.matches('[data-profile-select]'))inspectorDirty=true;
  if(event.target.dataset.field==='edge-size'){const n=Number(event.target.value);if(Number.isFinite(n)&&n>0)edgeSize=n;}
- if(event.target.hasAttribute('data-through-all')&&sketch){sketch.throughAll=event.target.checked;return;}
+ if(event.target.hasAttribute('data-through-all')&&sketch){sketch.throughAll=event.target.checked;queueSketchDraft();return;}
  if(event.target.hasAttribute('data-distance-reference')){if(sketch){sketch.distanceReference=event.target.value;syncSketchInputs();drawSketch();}return;}
  if(event.target.matches('[data-profile-select]')){selectedContour=Number(event.target.value);renderInspector();return;}
  if(event.target.dataset.placement){
@@ -531,10 +606,10 @@ $('#inspector').addEventListener('input',event=>{
   else syncPlacementControls();return;
  }
  if(!sketch)return;
- if(event.target.dataset.lock){sketch.locks[event.target.dataset.lock]=event.target.checked;return;}
+ if(event.target.dataset.lock){sketch.locks[event.target.dataset.lock]=event.target.checked;queueSketchDraft();return;}
  if(event.target.dataset.sketch)setSketchDimension(event.target.dataset.sketch,event.target.value,event.target);
 });
-$('#inspector').addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('input')&&!sketch){event.preventDefault();selectedFeature>=0?applyFeature():applyDimensions();}});
+$('#inspector').addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('input')&&!sketch&&!busy){event.preventDefault();if(event.target.dataset.field==='edge-size')applyEdge();else if(event.target.dataset.field==='shell-thickness')applyShell();else selectedFeature>=0?applyFeature():applyDimensions();}});
 $('#add-box').onclick=()=>addBody('box');$('#add-cylinder').onclick=()=>addBody('cylinder');
 $('#shape-library').innerHTML=Object.entries(SHAPES).filter(([kind])=>!['box','cylinder'].includes(kind)).map(([kind,s])=>`<button data-add-shape="${kind}" title="${s.name}" aria-label="${s.name}"><img src="./shapes/${kind}.png" alt="" width="128" height="96" draggable="false">${s.name}</button>`).join('');
 $('#plane-sketch').onclick=()=>startPlaneSketch();
@@ -575,6 +650,8 @@ async function init(){
   const entry=await library.initial(project);
   if(!await commit(entry.project,{entry,record:false,fit:true}))throw new Error(lastCommitError);
   sessionReady=true;
+  if(library.damaged().length)toast('Beschädigte Sicherung gefunden. Über Projekte kannst du ihre Rohdaten sichern.',true);
+  restorePreferredDraft();
 
  }catch(error){setBusy(false);setStatus('Start fehlgeschlagen · gespeicherte Projekte bleiben erhalten',false);toast(error.message,true);}
 }
@@ -603,7 +680,7 @@ setupSession({
  list:()=>library.list(),
  state:()=>{if(!sessionReady)throw new Error('Anwendung noch nicht bereit.');return sessionState();},
  async action(method,args){
-  if(!sessionReady||busy||sketch||drag||document.activeElement?.matches('#inspector input, #project-name'))throw new Error('Browser ist beschäftigt oder eine Skizze wird bearbeitet. Bitte den aktuellen Schritt zuerst beenden.');
+  if(!sessionReady||busy||sketch||drag||inspectorDirty||document.activeElement?.matches('#inspector input, #inspector select, #project-name'))throw new Error('Browser ist beschäftigt oder Eingaben sind noch nicht übernommen. Bitte den aktuellen Schritt zuerst übernehmen oder abbrechen.');
   if(args.projectId!==activeProjectId||args.revision!==projectRevision)throw new Error('Projekt oder Revision hat sich geändert. Erst formraum_get_project erneut lesen.');
   const stored=library.read(activeProjectId);
   if(!stored||stored.revision!==projectRevision)throw new Error('Projekt wurde in einem anderen Tab geändert. Bitte zuerst im Browser neu öffnen.');

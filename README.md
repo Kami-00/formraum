@@ -39,6 +39,10 @@ Für **GitHub Pages** ist `.github/workflows/pages.yml` vorbereitet: In den Repo
 
 **Öffnen** importiert Projekt- und STEP-Dateien als neues Projekt. **Speichern** lädt eine zusätzliche Projektdatei herunter. Browser-Speicher ist begrenzt und gehört zum jeweiligen Browserprofil und zur Website-Adresse; regelmäßig Dateien sichern. Speicherfehler oder Änderungen in einem anderen Tab werden sichtbar gemeldet und überschreiben nicht stillschweigend den vorherigen Stand. Rückgängig/Wiederholen bezieht sich auf die aktuelle Bearbeitungssitzung und wird beim Projektwechsel zurückgesetzt.
 
+Offene **Skizzenentwürfe** werden mit ihren Konturen, Maßen, Festlegungen und der ursprünglichen Modellversion separat im Browser gesichert. Nach einem Neuladen kannst du weiterzeichnen; **Speichern** nimmt den Entwurf auch in die Projektdatei auf. Unter **Projekte → Skizzenentwürfe** lassen sich weitere Sicherungen öffnen. Hat sich das Modell inzwischen geändert, wird der ursprüngliche Stand als eigenes Projekt wiederhergestellt. Entwürfe anderer Tabs und ältere Sicherungen werden dabei erhalten. **Skizze verwerfen** beendet den aktiven Entwurf ausdrücklich; bei einem Speicherfehler bleibt die Skizze ansonsten zum Sichern als Datei geöffnet.
+
+Ein beschädigter Projekteintrag blockiert die übrigen Projekte nicht. Unter **Projekte → Beschädigte Sicherungen** lassen sich seine unveränderten Rohdaten herunterladen. Während einer offenen Skizze sind andere Modelländerungen gesperrt, damit deren Bezugsfläche erhalten bleibt.
+
 ## Gemeinsam mit einer KI arbeiten
 
 Über **KI verbinden** kann jeder Nutzer einen lokalen MCP-Client mit dem geöffneten Tab koppeln. Die optionale Node.js-Brücke stellt acht MCP-Werkzeuge bereit: Projekte auflisten/öffnen/anlegen, aktives Modell und Ansicht lesen, geprüfte Änderungen vornehmen und rückgängig machen. Sitzungscode, explizites Verbinden und Revisionsprüfung verhindern Zugriff ohne Kopplung und veraltete Schreibversuche. Die reine Browser-Anwendung braucht weiterhin keine Installation.
@@ -66,7 +70,7 @@ Ein vollständiges Beispiel mit vier bemaßten Durchgangsbohrungen liegt in `exa
 
 Rechts ziehen dreht, das Mausrad zoomt, die mittlere Maustaste verschiebt die Ansicht. **F** passt das Modell ein. **Strg Z** macht einen Schritt rückgängig, **Strg Y** stellt ihn wieder her. Unter macOS funktioniert auch Cmd. **Oben**, **Vorn** und **Rechts** helfen beim Zeichnen.
 
-`examples/Beispielbauteil.formraum.json` enthält Aufbau, Kreistasche, Rundung und Fase; die passenden STEP-/STL-Dateien liegen daneben. Das vorhandene Projektformat Version 1 bleibt erhalten. Geometriebezüge werden anhand von Fläche, Normalen, Schwerpunkt und Kantenendpunkten geprüft und bei geänderter Open-CASCADE-Reihenfolge eindeutig zugeordnet. Nicht eindeutig zuordenbare Bezüge werden abgewiesen; die letzte gültige Geometrie bleibt erhalten. Alte Dateien ohne Geometrieanker erhalten diese nach erfolgreichem Aufbau.
+`examples/Beispielbauteil.formraum.json` enthält Aufbau, Kreistasche, Rundung und Fase; die passenden STEP-/STL-Dateien liegen daneben. Das vorhandene Projektformat Version 1 bleibt erhalten. Ebene Flächen werden über ihre Außenkontur, Lage und Normale zugeordnet; innere Bohrungen verschieben ihren Skizzenursprung nicht. Kantenbezüge werden über Geometrie und Endpunkte geprüft. Änderungen der Open-CASCADE-Reihenfolge werden eindeutig zugeordnet. Nicht eindeutig zuordenbare Bezüge werden abgewiesen; die letzte gültige Geometrie bleibt erhalten. Alte Bezüge werden beim erfolgreichen Laden unter Erhalt der Konturpositionen aktualisiert. Bereits inkonsistente alte Referenzen ohne Außenkontur-Daten lassen sich nicht sicher automatisch rekonstruieren.
 
 ## Daten und Grenzen
 

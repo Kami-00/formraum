@@ -1,5 +1,5 @@
 import {
-  makeBox, makeCylinder, makeSphere, draw, drawRectangle, drawCircle, drawEllipse, drawPolysides, cast, Plane, EdgeFinder, FaceFinder,
+  makeBox, makeCylinder, makeSphere, makeFace, draw, drawRectangle, drawCircle, drawEllipse, drawPolysides, cast, Plane, EdgeFinder, FaceFinder,
   measureVolume, measureArea, measureShapeLinearProperties,
   importSTEP, exportSTEP, makeCompound,
 } from 'replicad';
@@ -22,9 +22,15 @@ const unit=a=>mul(a,1/Math.hypot(...a));
 const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
 const takeVector=v=>{try{return v.toTuple();}finally{v.delete();}};
 function bounds(shape){const bb=shape.boundingBox;try{const [min,max]=bb.bounds;return {min,max};}finally{bb.delete();}}
-function frame(face){
+function outerCenter(face){
+  const wire=face.clone().outerWire();let filled;
+  try{filled=makeFace(wire);return takeVector(filled.center);}
+  finally{filled?.delete();wire.delete();}
+}
+function frame(face,legacy=false){
   if(face.geomType!=='PLANE')fail('Eine Skizze ist nur auf einer ebenen Fläche möglich.');
-  const normal=unit(takeVector(face.normalAt())),origin=takeVector(face.center);
+  // Inner wires must not move a sketch's coordinate origin when a prior hole changes.
+  const normal=unit(takeVector(face.normalAt())),origin=legacy?takeVector(face.center):outerCenter(face);
   const axis=Math.abs(normal[0])<.9?[1,0,0]:[0,1,0];
   const u=unit(add(axis,mul(normal,-dot(axis,normal))));
   return {origin,normal,u,v:unit(cross(normal,u))};
@@ -49,14 +55,32 @@ function rectangleBounds(face,f){
  }finally{edges.forEach(e=>e.delete());wire.delete();}
 }
 const geometryNames={PLANE:'Plane',CYLINDER:'Cylinder',CONE:'Cone',SPHERE:'Sphere',TORUS:'Toroid',LINE:'Line',CIRCLE:'Circle',ELLIPSE:'Ellipse',BSPLINE_CURVE:'BSplineCurve',BSPLINE_SURFACE:'BSplineSurface'};
-function reference(entity,bb,kind){
+function reference(entity,bb,kind,legacy=false){
   const normalized=p=>p.map((v,i)=>(v-bb.min[i])/Math.max(bb.max[i]-bb.min[i],EPS));
   let center;
   if(kind==='face')center=takeVector(entity.center);
   else{const props=measureShapeLinearProperties(entity);try{center=props.centerOfMass;}finally{props.delete();}}
   const result={version:1,kind,center:normalized(center)};
   const type=entity.geomType;
-  if(kind==='face'){result.surface=geometryNames[type]||type;if(type==='PLANE')result.normal=frame(entity).normal;}
+  if(kind==='face'){
+    result.surface=geometryNames[type]||type;
+    if(type==='PLANE'){
+      const f=frame(entity,legacy);result.normal=f.normal;
+      if(!legacy){
+        result.version=2;result.center=normalized(f.origin);
+        const wire=entity.clone().outerWire(),edges=wire.edges;
+        try{
+          // Keep the actual outer geometry, rather than only its bounding box or
+          // centroid. Order and direction of native edges can change on rebuild.
+          result.outerWire=edges.map(edge=>{
+            const curve=edge.curve;
+            try{return {curve:geometryNames[curve.curveType]||curve.curveType,points:[0,.25,.5,.75,1].map(t=>normalized(takeVector(curve.pointAt(t))))};}
+            finally{curve.delete();}
+          });
+        }finally{edges.forEach(edge=>edge.delete());wire.delete();}
+      }
+    }
+  }
   else{result.curve=geometryNames[type]||type;result.start=normalized(takeVector(entity.startPoint));result.end=normalized(takeVector(entity.endPoint));}
   return result;
 }
@@ -68,6 +92,17 @@ function matches(a,b){
 }
 function referenceMatches(a,b){
   if(matches(a,b))return true;
+  if(a.version===2&&b.version===2&&a.kind==='face'&&b.kind==='face'){
+    const {outerWire:first,...firstFace}=a,{outerWire:second,...secondFace}=b;
+    if(!matches(firstFace,secondFace)||!Array.isArray(first)||!Array.isArray(second)||first.length!==second.length)return false;
+    const remaining=[...second];
+    for(const edge of first){
+      const index=remaining.findIndex(other=>matches(edge,other)||matches(edge,{...other,points:[...other.points].reverse()}));
+      if(index<0)return false;
+      remaining.splice(index,1);
+    }
+    return true;
+  }
   // OC versions can reverse an edge while preserving the same geometric anchor.
   return b.kind==='edge'&&matches(a,{...b,start:b.end,end:b.start});
 }
@@ -76,9 +111,11 @@ function resolve(entities,index,expected,bb,kind){
     if(!expected)fail(`${kind==='face'?'Fläche':'Kante'}: ungültiger Index.`);
   }
   if(expected){
-    const candidates=entities.map((e,i)=>({entity:e,index:i+1,reference:reference(e,bb,kind)})).filter(c=>referenceMatches(expected,c.reference));
+    const legacy=kind==='face'&&expected.version===1;
+    const candidates=entities.map((e,i)=>({entity:e,index:i+1,reference:reference(e,bb,kind,legacy)})).filter(c=>referenceMatches(expected,c.reference));
     if(candidates.length!==1)fail(`${kind==='face'?'Bezugsfläche':'Bezugskante'} hat sich verändert oder ist nicht eindeutig. Bitte Bearbeitung neu auf der gewünschten Fläche oder Kante anlegen.`);
-    return candidates[0];
+    const selected=candidates[0];
+    return legacy?{...selected,legacy:true,reference:reference(selected.entity,bb,kind)}:selected;
   }
   return {entity:entities[index-1],index,reference:reference(entities[index-1],bb,kind)};
 }
@@ -127,7 +164,7 @@ export function createKernel(oc){
   }
   function sketchTool(profiles,makePrism){
     if(!Array.isArray(profiles)||!profiles.length||profiles.length>12)fail('Eine Skizze benötigt 1 bis 12 Konturen.');
-    const solids=[],holes=[];let result;
+    const solids=[],holes=[];let result,normal;
     try{
       for(const profile of profiles){
         object(profile,'Kontur');if(profile.role!=null&&!['solid','hole'].includes(profile.role))fail('Unbekannte Konturrolle.');
@@ -136,13 +173,18 @@ export function createKernel(oc){
       if(!solids.length)fail('Mindestens eine normale Kontur ist erforderlich. Für Bohrungen normale Kreise zeichnen und Ausschneiden wählen.');
       result=solids[0].clone();
       for(const solid of solids.slice(1)){const next=result.fuse(solid);result.delete();result=next;}
+      normal=result.clone();
       for(const hole of holes){
-        const before=measureVolume(result),next=result.cut(hole);result.delete();result=next;
-        if(Math.abs(measureVolume(result)-before)<EPS)fail('Eine Aussparung muss eine normale Kontur überlappen.');
+        // Validate against the original normal contours: another hole may have
+        // already removed this region, which is a valid redundant cutout.
+        const overlap=normal.intersect(hole);
+        try{if(measureVolume(overlap)<=EPS)fail('Eine Aussparung muss eine normale Kontur überlappen.');}
+        finally{overlap.delete();}
+        const next=result.cut(hole);result.delete();result=next;
       }
       if(measureVolume(result)<=EPS)fail('Die Aussparungen entfernen die gesamte Skizze.');
       const ready=result;result=null;return ready;
-    }finally{result?.delete();solids.forEach(p=>p.delete());holes.forEach(p=>p.delete());}
+    }finally{normal?.delete();result?.delete();solids.forEach(p=>p.delete());holes.forEach(p=>p.delete());}
   }
   async function buildObject(spec,depth=0,keepLocal=false,budget={count:0}){
     if(++budget.count>150)fail('Maximal 150 Ausgangskörper einschließlich Kombinationen möglich.');
@@ -197,7 +239,7 @@ export function createKernel(oc){
           for(const other of parts.slice(1)){
             const before=measureVolume(shape),next=spec.operation==='union'?shape.fuse(other):spec.operation==='cut'?shape.cut(other):shape.intersect(other);
             shape.delete();shape=next;validate(shape);
-            if(spec.operation!=='union'&&Math.abs(measureVolume(shape)-before)<EPS)fail('Die Körper überlappen sich nicht oder ändern das Volumen nicht.');
+            if(spec.operation==='cut'&&Math.abs(measureVolume(shape)-before)<EPS)fail('Die Körper überlappen sich nicht oder ändern das Volumen nicht.');
           }
         }}finally{parts.forEach(part=>part.delete());}
       }
@@ -219,8 +261,10 @@ export function createKernel(oc){
             if(feature.throughAll!=null&&typeof feature.throughAll!=='boolean')fail('Durch alles muss ein Wahrheitswert sein.');
             const depth=feature.type==='pocket'&&feature.throughAll?Math.hypot(...bb.max.map((v,i)=>v-bb.min[i]))+1:number(feature.depth??5,'Tiefe',.01);
             const f=frame(support.entity),rect=rectangleBounds(support.entity,f);feature.supportRectangle=!!rect;
+            const legacyOrigin=support.legacy?frame(support.entity,true).origin:null;
             prism=sketchTool([object(feature.sketch,'Skizze'),...(feature.contours??[])],sk=>{
-              vector(sk.center??[0,0],'Skizzenmittelpunkt',2);
+              sk.center=vector(sk.center??[0,0],'Skizzenmittelpunkt',2);
+              if(legacyOrigin){const offset=add(legacyOrigin,mul(f.origin,-1));sk.center=sk.center.map((v,i)=>v+dot(offset,i===0?f.u:f.v));}
               const center=sk.constraints?positionedCenter(sk,rect):(sk.center??[0,0]);
               sk.center=vector(center,'Skizzenmittelpunkt',2);
               const origin=add(f.origin,add(mul(f.u,center[0]),mul(f.v,center[1]))),plane=new Plane(origin,f.u,f.normal);
