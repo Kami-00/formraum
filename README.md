@@ -1,6 +1,6 @@
 # Formraum · CAD im Browser
 
-**[Lokale Live-Vorschau öffnen](http://127.0.0.1:5173/)** · Erreichbar auf deinem Rechner, solange der lokale Entwicklungsserver läuft.
+**[Formraum direkt im Browser öffnen](https://kami-00.github.io/formraum/)**
 
 Formraum läuft vollständig im Browser: Oberfläche, echte CAD-Volumenkörper, STEP-Import und STEP-/STL-Export. FreeCAD, Python und ein CAD-Backend werden nicht benötigt. Open CASCADE wird als WebAssembly in einem Web Worker ausgeführt; Projekt- und Modelldaten bleiben auf deinem Gerät. Alle Maße sind in Millimetern.
 
