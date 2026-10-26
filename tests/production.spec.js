@@ -31,5 +31,10 @@ test('built app works on a static subpath and offline, including CAD export',asy
   await expect(page.locator('#project-name')).toHaveValue('Beispielbauteil');
   await page.getByRole('button',{name:'Zylinder',exact:true}).click();await expect(page.locator('#body-count')).toHaveText('2');
   await page.locator('#export-menu-button').click();const download=page.waitForEvent('download');await page.locator('[data-export="step"]').click();expect((await download).suggestedFilename()).toBe('Beispielbauteil.step');
+  // The separate preview worker must also load from a subpath while offline.
+  await page.locator('#plane-sketch').click();await page.locator('[data-sketch="width"]').fill('10');
+  await expect(page.locator('#sketch-preview-status')).toHaveAttribute('data-state','ready',{timeout:60000});
+  await expect.poll(async()=>Number(await page.locator('#sketch-preview-status').getAttribute('data-volume'))).toBeCloseTo(1000,4);
+  await page.locator('[data-action="cancel-sketch"]').click();await expect(page.locator('#body-count')).toHaveText('2');
   expect(errors).toEqual([]);expect(failures).toEqual([]);expect(requests.every(r=>r.method==='GET'&&r.url.startsWith(url))).toBe(true);
 });

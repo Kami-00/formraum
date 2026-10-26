@@ -20,3 +20,10 @@
 
 .sketch-help{font-size:11px;color:#6c818b;margin:5px 0 14px}.sketch-help summary{cursor:pointer}.sketch-help p{margin-top:8px}
 .project-recovery{border-top:1px solid var(--line);margin-top:18px;padding-top:12px}.project-recovery h3{font-size:13px}.project-recovery p,.recovery-card>span{font-size:11px;line-height:1.6;color:#718692;overflow-wrap:anywhere}.recovery-card{padding:10px;border:1px solid #e4d5ac;border-radius:7px;margin:8px 0;background:#fffdf5}.recovery-card .subtle-button{width:auto;margin-top:7px}
+.sketch-preview-panel{margin:14px 0;padding:12px;border:1px solid #cbdcd9;border-radius:10px;background:#f2f8f7}
+.preview-mode-buttons{display:flex;gap:6px;margin:8px 0}
+.preview-mode-buttons button{flex:1;padding:7px 4px;border:1px solid #cbdcd9;border-radius:6px;background:white;color:#355d65;cursor:pointer;font:inherit;font-size:12px}
+.preview-mode-buttons button.active{background:#d8efea;border-color:#258d7c;color:#146556}
+#sketch-preview-status{font-size:12px;line-height:1.45;margin:8px 0;color:#526d74}
+#sketch-preview-status[data-state="error"]{color:#a34432}
+#sketch-preview-status[data-state="ready"]{color:#146556}

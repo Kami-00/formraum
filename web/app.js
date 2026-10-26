@@ -6,6 +6,7 @@ import {ProjectStore,PROJECT_PREFIX} from './project-store.js';
 import {SketchDraftStore,validateDraft,sameReference} from './sketch-drafts.js';
 import {setupSession} from './session.js';
 import {calculate} from './cad-client.js';
+import {createPreviewClient} from './preview-client.js';
 import * as THREE from './vendor/three.module.js';
 import {OrbitControls} from './vendor/OrbitControls.js';
 
@@ -26,6 +27,7 @@ let project=makeDefault(), models=[], selectedId=project.objects[0].id, selected
 let tool='select', sketch=null, busy=false, undoStack=[], redoStack=[], hoverEdge=null, drag=null, requestVersion=0, toastTimer, edgeSize=1;
 let savedCamera=null, lastPointer=null, selectedContour=0;
 let selectedBodies=new Set([selectedId]);
+let sketchPreview=null;
 
 const viewport=$('#viewport');
 const scene=new THREE.Scene();scene.background=new THREE.Color('#f0f4f6');
@@ -47,6 +49,7 @@ for(const [dir,color] of [[[35,0,0],0xc98076],[[0,35,0],0x83a17c],[[0,0,25],0x78
  axes.add(new THREE.Line(geometry,new THREE.LineBasicMaterial({color,transparent:true,opacity:.5})));
 }scene.add(axes);
 const bodyRoot=new THREE.Group(), overlayRoot=new THREE.Group(), sketchRoot=new THREE.Group();scene.add(bodyRoot,overlayRoot,sketchRoot);
+const previewRoot=new THREE.Group();scene.add(previewRoot);
 let bodyMeshes=[], edgeLines=[], groups=new Map(), viewHeight=90;
 const raycaster=new THREE.Raycaster(), pointer=new THREE.Vector2();
 const dimensionLayer=document.createElement('div');dimensionLayer.className='dimension-layer';viewport.appendChild(dimensionLayer);
@@ -111,7 +114,7 @@ function projectBounds(){
  if(bounds.isEmpty())bounds.set(new THREE.Vector3(-20,-20,0),new THREE.Vector3(20,20,20));return bounds;
 }
 function fitView(direction=null){
- if(sketch){const model=models.find(m=>m.id===selectedId);const size=model?vec(model.bounds.max).sub(vec(model.bounds.min)).length():60;const aspect=viewport.clientWidth/viewport.clientHeight;viewHeight=Math.max(size*1.15/Math.min(aspect,1),35);camera.zoom=1;resize();return;}
+ if(sketch){const bounds=sketchPreview?.view3d&&sketchPreview.bounds?sketchPreview.bounds:currentModel()?.bounds;const size=bounds?vec(bounds.max).sub(vec(bounds.min)).length():60;if(sketchPreview?.view3d&&bounds){const center=vec(bounds.min).add(vec(bounds.max)).multiplyScalar(.5);camera.position.add(center.clone().sub(controls.target));controls.target.copy(center);controls.update();}const aspect=viewport.clientWidth/viewport.clientHeight;viewHeight=Math.max(size*1.15/Math.min(aspect,1),35);camera.zoom=1;resize();return;}
  const bounds=projectBounds(),center=bounds.getCenter(new THREE.Vector3()),radius=bounds.getSize(new THREE.Vector3()).length()/2;
  const dir=direction?vec(direction):camera.position.clone().sub(controls.target).normalize();
  camera.up.set(0,0,1);camera.position.copy(center).addScaledVector(dir.normalize(),Math.max(radius*5,200));controls.target.copy(center);
@@ -281,6 +284,7 @@ function startPlaneSketch(){
  beginSketch({id:0,origin:[0,0,0],normal:[0,0,1],u:[1,0,0],v:[0,1,0]},true);
 }
 function beginSketch(face,standalone){
+ stopSketchPreview();sketchPreview={objectId:uid(),enabled:true,mode:'extrude',generation:0,signature:'',desired:null,client:null,request:null,timer:null,state:'idle',message:'Kontur zeichnen, um die Vorschau zu sehen.',view3d:false};
  draftBase={projectId:activeProjectId,revision:projectRevision,project:clone(project)};draftId=null;draftSourceId=null;lastDraftSignature='';draftPersisted=true;
  sketch={face,standalone,kind:'rectangle',center:[0,0],width:10,height:10,radius:5,sides:6,angle:0,depth:10,snap:1,hasDrawn:false,locks:{},invalid:{},constraints:{},distanceReference:'outline',role:'solid',throughAll:false,profiles:[],activeContour:0};tool='sketch';sketch.profiles=[captureContour()];
  savedCamera={position:camera.position.clone(),up:camera.up.clone(),target:controls.target.clone(),height:viewHeight,zoom:camera.zoom};
@@ -294,6 +298,7 @@ function cancelSketch({discard=false}={}){
  clearTimeout(draftTimer);
  if(discard){try{if(draftId)drafts.remove(draftId);if(draftSourceId)drafts.remove(draftSourceId);}catch(error){toast('Alte Entwurfssicherung konnte nicht entfernt werden. Sie bleibt zur Wiederherstellung erhalten.',true);}}
  else if(!persistSketchDraft())return false;
+ stopSketchPreview();
  draftBase=null;draftId=null;draftSourceId=null;lastDraftSignature='';draftPersisted=true;
  sketch=null;for(const {label} of dimensionInputs.values())label.hidden=true;tool='select';disposeGroup(sketchRoot);measureLabel.hidden=true;
  controls.enableRotate=true;controls.mouseButtons.RIGHT=THREE.MOUSE.ROTATE;grid.visible=true;axes.visible=true;
@@ -354,7 +359,9 @@ function renderSketchInspector(){
  if(!sketch)return;const s=sketch;
  const dimension=(label,key,value)=>`${skField(label,key,value)}<label class="locked-dimension"><input type="checkbox" data-lock="${key}" ${s.locks[key]?'checked':''}> Maß festhalten</label>`;
  $('#inspector').innerHTML=`<div class="inspector-heading">${s.standalone?'SKIZZE · XY-EBENE':'SKIZZE AUF FLÄCHE '+s.face.id}${icon('sketch')}</div><div class="inspector-content">${contourList()}<p class="tool-description">Kontur zeichnen oder Maße direkt eingeben.</p><div class="sketch-types">${['rectangle','circle','ellipse','polygon'].map(kind=>`<button data-sketch-kind="${kind}" class="${s.kind===kind?'active':''}">${sketchName(kind)}</button>`).join('')}</div><div class="sketch-status" id="sketch-status"></div>${isRadial(s.kind)?dimension('Radius','radius',s.radius):`<div class="fields-2"><div>${dimension('Breite','width',s.width)}</div><div>${dimension('Höhe','height',s.height)}</div></div>`}${s.kind==='circle'?skField('Durchmesser','diameter',s.radius*2):''}${s.kind==='polygon'?skField('Seiten','sides',s.sides,''):''}${skField('Winkel','angle',s.angle,'°')}${placementFields(s.constraints,!!s.face.sketchBounds,'sketch',1,s.distanceReference)}<div class="section-title">MITTELPUNKT</div><div class="fields-2">${skField('U','center-u',s.center[0])}${skField('V','center-v',s.center[1])}</div><hr class="divider">${skField('Höhe / Tiefe','depth',s.depth)}${s.standalone?'':`<label class="locked-dimension"><input type="checkbox" data-through-all ${s.throughAll?'checked':''}> Ausschneiden: Durch alles</label>`}<div class="action-duo"><button class="primary" data-action="extrude">${icon('extrude')}Aufbauen</button>${s.standalone?'':`<button class="subtle-button" data-action="pocket">${icon('cut')}Ausschneiden</button>`}</div><button class="subtle-button" data-action="cancel-sketch">Skizze verwerfen</button>${skField('Fangraster','snap',s.snap)}<p class="tip">Eingegebene Konturmaße bleiben beim Zeichnen fest. Fangraster 0 schaltet das Einrasten aus.</p></div>`;
- syncSketchInputs();
+ const actions=$('.action-duo',$('#inspector'));
+ actions.insertAdjacentHTML('beforebegin',`<section class="sketch-preview-panel"><label class="locked-dimension"><input type="checkbox" id="sketch-preview-enabled" ${sketchPreview?.enabled?'checked':''}> Live-Vorschau</label><div class="preview-mode-buttons"><button data-preview-mode="extrude">Aufbauen</button>${s.standalone?'':'<button data-preview-mode="pocket">Ausschneiden</button>'}</div><p id="sketch-preview-status" role="status"></p><button class="subtle-button" id="sketch-preview-3d">3D ansehen</button></section>`);
+ syncSketchInputs();syncSketchPreviewPanel();
 }
 function skField(label,key,value,unit='mm'){return field(label,'sk-'+key,value,unit).replace(`data-field="sk-${key}"`,`data-sketch="${key}"`);}
 function setSketchDimension(key,raw,input){
@@ -383,13 +390,13 @@ function syncSketchInputs(){
 function toSketchWorld(u,v,lift=.06){return vec(sketch.face.origin).addScaledVector(vec(sketch.face.u),u).addScaledVector(vec(sketch.face.v),v).addScaledVector(vec(sketch.face.normal),lift);}
 function drawSketch(){
  disposeGroup(sketchRoot);measureLabel.hidden=true;for(const {label} of dimensionInputs.values())label.hidden=true;if(!sketch)return;
- queueSketchDraft();
+ queueSketchDraft();queueSketchPreview();
  const s=sketch,origin=vec(s.face.origin),u=vec(s.face.u),v=vec(s.face.v),normal=vec(s.face.normal);
  const model=currentModel();const size=Math.max(model?vec(model.bounds.max).sub(vec(model.bounds.min)).length():60,40);const gridStep=s.snap>0?Math.max(s.snap,1):5;
  const gridPoints=[];const extent=Math.min(Math.ceil(size/gridStep),100)*gridStep;
  for(let t=-extent;t<=extent;t+=gridStep){gridPoints.push(toSketchWorld(t,-extent,.025),toSketchWorld(t,extent,.025),toSketchWorld(-extent,t,.025),toSketchWorld(extent,t,.025));}
  for(const guide of s.guides||[]){const pts=guide.axis===0?[toSketchWorld(guide.value,-extent),toSketchWorld(guide.value,extent)]:[toSketchWorld(-extent,guide.value),toSketchWorld(extent,guide.value)];const line=new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),new THREE.LineDashedMaterial({color:0xf0a442,dashSize:1,gapSize:.6,depthTest:false}));line.computeLineDistances();sketchRoot.add(line);}
- const g=new THREE.BufferGeometry().setFromPoints(gridPoints);sketchRoot.add(new THREE.LineSegments(g,new THREE.LineBasicMaterial({color:0x79aba3,transparent:true,opacity:.13,depthTest:false})));
+ if(!sketchPreview?.view3d){const g=new THREE.BufferGeometry().setFromPoints(gridPoints);sketchRoot.add(new THREE.LineSegments(g,new THREE.LineBasicMaterial({color:0x79aba3,transparent:true,opacity:.13,depthTest:false})));}
  for(const [i,profile] of s.profiles.entries())if(i!==s.activeContour&&profile.hasDrawn){
   const line=new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(contourPoints(profile)),new THREE.LineBasicMaterial({color:profile.role==='hole'?0xd78835:0x579aab,depthTest:false}));line.renderOrder=21;sketchRoot.add(line);
  }
@@ -401,7 +408,7 @@ function drawSketch(){
  const line=new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(points),new THREE.LineBasicMaterial({color:s.role==='hole'?0xd78835:0x008c7b,depthTest:false}));line.renderOrder=20;sketchRoot.add(line);
  const center=toSketchWorld(cu,cv),fillPositions=[];
  for(let i=0;i<points.length;i++)fillPositions.push(...center.toArray(),...points[i].toArray(),...points[(i+1)%points.length].toArray());
- const fillGeom=new THREE.BufferGeometry();fillGeom.setAttribute('position',new THREE.Float32BufferAttribute(fillPositions,3));const fill=new THREE.Mesh(fillGeom,new THREE.MeshBasicMaterial({color:0x1cb79e,transparent:true,opacity:.16,depthTest:false,side:THREE.DoubleSide,depthWrite:false}));fill.renderOrder=19;sketchRoot.add(fill);
+ const fillGeom=new THREE.BufferGeometry();fillGeom.setAttribute('position',new THREE.Float32BufferAttribute(fillPositions,3));const fill=new THREE.Mesh(fillGeom,new THREE.MeshBasicMaterial({color:0x1cb79e,transparent:true,opacity:.16,depthTest:false,side:THREE.DoubleSide,depthWrite:false}));fill.renderOrder=19;fill.userData.sketchFill=true;fill.visible=!previewRoot.children.length;sketchRoot.add(fill);
  const offset=viewHeight/camera.zoom/viewport.clientHeight*32;
  if(isRadial(s.kind))sketchDimension(point(s.kind==='circle'?-s.radius:0,0),point(s.radius,0),s.kind==='circle'?'diameter':'radius',s.kind==='circle'?s.radius*2:s.radius);
  else {sketchDimension(point(-s.width/2,-s.height/2-offset),point(s.width/2,-s.height/2-offset),'width',s.width);sketchDimension(point(s.width/2+offset,-s.height/2),point(s.width/2+offset,s.height/2),'height',s.height);}
@@ -428,9 +435,7 @@ function pickEdge(event){
  const bodyHit=raycaster.intersectObjects(bodyMeshes,false)[0];
  return raycaster.intersectObjects(edgeLines,false).find(hit=>!bodyHit||hit.distance<bodyHit.distance+raycaster.params.Line.threshold*2)||null;
 }
-async function applySketch(type){
- if(!sketch||busy)return;saveContour();
- if(!sketch.profiles.some(p=>p.hasDrawn)||sketch.profiles.some(p=>Object.values(p.invalid).some(Boolean)))return;
+function sketchCandidate(type){
  const s=clone(sketch),next=clone(project),spec=next.objects.find(o=>o.id===selectedId),scale=s.standalone?1:(spec.scale??1);
  const profiles=s.profiles.filter(p=>p.hasDrawn).map(p=>{
   const profile={kind:p.kind,center:p.center.map(v=>v/scale),angle:p.angle,role:p.role,distanceReference:p.distanceReference};
@@ -439,12 +444,84 @@ async function applySketch(type){
   return profile;
  });
  const [profile,...contours]=profiles;
- if(s.standalone)next.objects.push({id:uid(),name:sketchName(profile.kind),kind:'profile',profile,contours,plane:'XY',params:{height:s.depth},position:[0,0,0],features:[],color:'#67aba9'});
+ if(s.standalone)next.objects.push({id:sketchPreview.objectId,name:sketchName(profile.kind),kind:'profile',profile,contours,plane:'XY',params:{height:s.depth},position:[0,0,0],features:[],color:'#67aba9'});
  else spec.features.push({type,face:s.face.id,reference:s.face.reference,sketch:profile,contours,depth:s.depth/scale,...(type==='pocket'?{throughAll:s.throughAll}:{})});
+ return {next,bodyId:s.standalone?sketchPreview.objectId:spec.id};
+}
+async function applySketch(type){
+ if(!sketch||busy)return;saveContour();
+ if(!sketch.profiles.some(p=>p.hasDrawn)||sketch.profiles.some(p=>Object.values(p.invalid).some(Boolean)))return;
+ const s=clone(sketch),{next}=sketchCandidate(type);
+ resetSketchPreviewWork();
  // A failed operation keeps the editable sketch and all prior geometry.
  const ok=await commit(next,{fromSketch:true,message:type==='extrude'?'Skizze aufgebaut':'Tasche ausgeschnitten'});
  if(ok){cancelSketch({discard:true});selectedFace=null;if(s.standalone)selectObject(next.objects.at(-1).id);renderSelection();renderPanels();renderProjectList();}
  else{sketch=s;tool='sketch';selectedFace=s.face;renderSketchInspector();renderSelection();drawSketch();updateToolButtons();}
+}
+
+function clearSketchPreviewGeometry(){
+ disposeGroup(previewRoot);overlayRoot.visible=true;
+ for(const child of sketchRoot.children)if(child.userData.sketchFill)child.visible=true;
+ for(const [id,group] of groups)group.visible=project.objects.find(o=>o.id===id)?.visible!==false;
+ if(sketchPreview)sketchPreview.bounds=null;
+}
+function resetSketchPreviewWork(){
+ const ctx=sketchPreview;if(!ctx)return;
+ clearTimeout(ctx.timer);ctx.generation++;ctx.desired=null;ctx.signature='';ctx.request=null;
+ ctx.client?.dispose();ctx.client=null;clearSketchPreviewGeometry();
+}
+function stopSketchPreview(){resetSketchPreviewWork();sketchPreview=null;}
+function syncSketchPreviewPanel(){
+ const ctx=sketchPreview,status=$('#sketch-preview-status');if(!ctx||!status)return;
+ status.dataset.state=ctx.state;status.textContent=ctx.message;
+ if(ctx.state==='ready')status.dataset.volume=String(ctx.volume);else delete status.dataset.volume;
+ $('#sketch-preview-enabled').checked=ctx.enabled;
+ $$('[data-preview-mode]').forEach(b=>{b.classList.toggle('active',b.dataset.previewMode===ctx.mode);b.setAttribute('aria-pressed',String(b.dataset.previewMode===ctx.mode));});
+ $('#sketch-preview-3d').textContent=ctx.view3d?'Zur Skizzenansicht':'3D ansehen';
+}
+function previewStatus(ctx,state,message){ctx.state=state;ctx.message=message;if(ctx===sketchPreview)syncSketchPreviewPanel();}
+function queueSketchPreview(){
+ const ctx=sketchPreview;if(!sketch||!ctx||busy)return;
+ saveContour();
+ const signature=JSON.stringify([ctx.enabled,ctx.mode,sketch.profiles,sketch.depth,sketch.throughAll]);
+ if(signature===ctx.signature)return;ctx.signature=signature;ctx.generation++;clearTimeout(ctx.timer);ctx.desired=null;clearSketchPreviewGeometry();
+ if(!ctx.enabled){previewStatus(ctx,'disabled','Live-Vorschau ausgeschaltet.');return;}
+ if(sketch.profiles.some(p=>Object.values(p.invalid).some(Boolean))){previewStatus(ctx,'error','Bitte ungültige Maße korrigieren.');return;}
+ if(!sketch.profiles.some(p=>p.hasDrawn)){previewStatus(ctx,'idle','Kontur zeichnen, um die Vorschau zu sehen.');return;}
+ const {next,bodyId}=sketchCandidate(ctx.mode);
+ if(next.objects.length>30){previewStatus(ctx,'error','Maximal 30 Körper pro Projekt möglich.');return;}
+ ctx.desired={generation:ctx.generation,bodyId,project:{...next,objects:next.objects.filter(o=>o.id===bodyId)}};
+ previewStatus(ctx,'calculating','Vorschau wird berechnet …');
+ ctx.timer=setTimeout(()=>{ctx.timer=null;runSketchPreview(ctx);},180);
+}
+async function runSketchPreview(ctx){
+ if(ctx!==sketchPreview||!ctx.enabled||ctx.request||!ctx.desired||ctx.timer)return;
+ const request=ctx.desired;ctx.desired=null;ctx.request=request;
+ try{
+  ctx.client??=createPreviewClient();const result=await ctx.client.calculate(request.project);
+  if(ctx!==sketchPreview||ctx.generation!==request.generation)return;
+  const model=result.objects.find(m=>m.id===request.bodyId);if(!model)throw new Error('Kein Vorschaukörper berechnet.');
+  clearSketchPreviewGeometry();
+  const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(model.mesh.vertices.flat(),3));geometry.setIndex(model.mesh.triangles.flat());geometry.computeVertexNormals();
+  previewRoot.add(new THREE.Mesh(geometry,new THREE.MeshStandardMaterial({color:ctx.mode==='pocket'?0xd6a464:0x67aba9,roughness:.52,metalness:.06,side:THREE.DoubleSide,polygonOffset:true,polygonOffsetFactor:1,polygonOffsetUnits:1})));
+  for(const edge of model.edges)if(edge.points.length>1)previewRoot.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(edge.points.map(vec)),new THREE.LineBasicMaterial({color:0x355d65})));
+  const original=groups.get(request.bodyId);if(original)original.visible=false;overlayRoot.visible=false;
+  for(const child of sketchRoot.children)if(child.userData.sketchFill)child.visible=false;
+  ctx.bounds=model.bounds;ctx.volume=model.volume;previewStatus(ctx,'ready','Vorschau bereit · noch nicht übernommen');
+ }catch(error){if(ctx===sketchPreview&&ctx.generation===request.generation){clearSketchPreviewGeometry();previewStatus(ctx,'error',error.message);}}
+ finally{if(ctx.request===request){ctx.request=null;if(ctx===sketchPreview)runSketchPreview(ctx);}}
+}
+function toggleSketchPreviewView(){
+ const ctx=sketchPreview;if(!sketch||!ctx)return;ctx.view3d=!ctx.view3d;
+ const face=sketch.face,origin=vec(face.origin),normal=vec(face.normal);
+ const direction=ctx.view3d?normal.addScaledVector(vec(face.u),.8).addScaledVector(vec(face.v),-.65).normalize():normal;
+ const bounds=ctx.bounds?new THREE.Box3(vec(ctx.bounds.min),vec(ctx.bounds.max)):projectBounds();
+ const target=ctx.view3d?bounds.getCenter(new THREE.Vector3()):origin;
+ camera.up.copy(vec(face.v));camera.position.copy(target).addScaledVector(direction,200);controls.target.copy(target);camera.lookAt(target);
+ controls.enableRotate=ctx.view3d;controls.mouseButtons.RIGHT=ctx.view3d?THREE.MOUSE.ROTATE:THREE.MOUSE.PAN;
+ viewHeight=Math.max(bounds.getSize(new THREE.Vector3()).length()*1.2/Math.min(viewport.clientWidth/viewport.clientHeight,1),40);camera.zoom=1;resize();controls.update();
+ $('#navigation-hint').textContent=ctx.view3d?'Links ziehen: zeichnen · Rechts ziehen: drehen · Esc: Skizze beenden':'Links ziehen: zeichnen · Rechts ziehen: verschieben · Esc: Skizze beenden';
+ syncSketchPreviewPanel();
 }
 
 renderer.domElement.addEventListener('contextmenu',e=>e.preventDefault());
@@ -547,6 +624,8 @@ async function redo(){
 document.addEventListener('click',async event=>{
  const button=event.target.closest('button');
  if(button?.disabled)return;
+ if(button?.dataset.previewMode&&sketchPreview){sketchPreview.mode=button.dataset.previewMode;queueSketchPreview();syncSketchPreviewPanel();return;}
+ if(button?.id==='sketch-preview-3d'){toggleSketchPreviewView();return;}
  if(button?.dataset.backupDamaged!==undefined){const e=library.damaged()[Number(button.dataset.backupDamaged)];if(e)download(new Blob([e.raw],{type:'application/json'}),'Formraum-beschaedigte-Sicherung.json');return;}
  if(button?.dataset.restoreDraft){await openSketchDraft(button.dataset.restoreDraft);return;}
  if(button?.dataset.openSaved){await openSaved(button.dataset.openSaved);return;}
@@ -596,9 +675,10 @@ document.addEventListener('click',async event=>{
  if(!event.target.closest('.export-wrap'))$('#export-menu').hidden=true;
 });
 $('#inspector').addEventListener('input',event=>{
+ if(event.target.id==='sketch-preview-enabled'&&sketchPreview){resetSketchPreviewWork();sketchPreview.enabled=event.target.checked;queueSketchPreview();return;}
  if(!sketch&&!event.target.matches('[data-profile-select]'))inspectorDirty=true;
  if(event.target.dataset.field==='edge-size'){const n=Number(event.target.value);if(Number.isFinite(n)&&n>0)edgeSize=n;}
- if(event.target.hasAttribute('data-through-all')&&sketch){sketch.throughAll=event.target.checked;queueSketchDraft();return;}
+ if(event.target.hasAttribute('data-through-all')&&sketch){sketch.throughAll=event.target.checked;queueSketchDraft();queueSketchPreview();return;}
  if(event.target.hasAttribute('data-distance-reference')){if(sketch){sketch.distanceReference=event.target.value;syncSketchInputs();drawSketch();}return;}
  if(event.target.matches('[data-profile-select]')){selectedContour=Number(event.target.value);renderInspector();return;}
  if(event.target.dataset.placement){
@@ -642,7 +722,7 @@ document.addEventListener('keydown',event=>{
  if(event.key==='Delete'&&currentSpec()){$('[data-action="delete-body"]')?.click();}
 });
 
-renderer.setAnimationLoop(()=>{controls.update();renderer.render(scene,camera);});
+renderer.setAnimationLoop(()=>{controls.update();if(sketch){camera.updateMatrixWorld();for(const entry of dimensionInputs.values())if(!entry.label.hidden&&entry.anchor)positionDimensionLabel(entry.label,entry.anchor);}renderer.render(scene,camera);});
 async function init(){
  renderPanels();resize();setBusy(true);setStatus('CAD-Kern wird im Browser geladen …');
  try{
@@ -754,8 +834,14 @@ function sketchDimension(a,b,key,value){
  const direction=b.clone().sub(a).normalize(),tick=direction.clone().cross(vec(sketch.face.normal)).multiplyScalar(viewHeight/camera.zoom/viewport.clientHeight*5);
  const geom=new THREE.BufferGeometry().setFromPoints([a,b,a.clone().sub(tick),a.clone().add(tick),b.clone().sub(tick),b.clone().add(tick)]);
  const lines=new THREE.LineSegments(geom,new THREE.LineBasicMaterial({color:0x276c89,depthTest:false}));lines.renderOrder=30;sketchRoot.add(lines);
- middle.project(camera);label.hidden=false;label.style.left=`${Math.max(50,Math.min(viewport.clientWidth-50,(middle.x+1)/2*viewport.clientWidth))}px`;label.style.top=`${Math.max(30,Math.min(viewport.clientHeight-30,(1-middle.y)/2*viewport.clientHeight))}px`;
+ dimensionInputs.get(key).anchor=middle;label.hidden=false;positionDimensionLabel(label,middle);
  if(document.activeElement!==input&&!sketch.invalid[key]){input.value=Number(value.toFixed(3));input.setCustomValidity('');}
+}
+
+function positionDimensionLabel(label,anchor){
+ const point=anchor.clone().project(camera);
+ label.style.left=`${Math.max(50,Math.min(viewport.clientWidth-50,(point.x+1)/2*viewport.clientWidth))}px`;
+ label.style.top=`${Math.max(30,Math.min(viewport.clientHeight-30,(1-point.y)/2*viewport.clientHeight))}px`;
 }
 
 function placementFields(constraints={},hasEdges,context,scale=1,distanceReference='outline'){
