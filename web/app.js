@@ -7,6 +7,7 @@ import {SketchDraftStore,validateDraft,sameReference} from './sketch-drafts.js';
 import {setupSession} from './session.js';
 import {calculate} from './cad-client.js';
 import {createPreviewClient} from './preview-client.js';
+import {createBodyPattern} from './body-patterns.js';
 import * as THREE from './vendor/three.module.js';
 import {OrbitControls} from './vendor/OrbitControls.js';
 
@@ -28,6 +29,8 @@ let tool='select', sketch=null, busy=false, undoStack=[], redoStack=[], hoverEdg
 let savedCamera=null, lastPointer=null, selectedContour=0;
 let selectedBodies=new Set([selectedId]);
 let sketchPreview=null;
+let patternMode='linear',measurementResult=null;
+const moveSettings={plane:'xy',axis:'free',snap:1};
 
 const viewport=$('#viewport');
 const scene=new THREE.Scene();scene.background=new THREE.Color('#f0f4f6');
@@ -184,7 +187,7 @@ window.addEventListener('storage',event=>{
 });
 
 function field(label,key,value,unit='mm',extra=''){
- return `<label class="field"><span>${esc(label)}</span><div class="input-unit"><input type="number" data-field="${esc(key)}" value="${Number(value??0)}" step="0.1" ${extra} aria-label="${esc(label)}">${unit?`<em>${esc(unit)}</em>`:''}</div></label>`;
+ return `<label class="field"><span>${esc(label)}</span><div class="input-unit"><input type="number" data-field="${esc(key)}" value="${Number(value??0)}" ${extra.includes('step=')?'':'step="0.1"'} ${extra} aria-label="${esc(label)}">${unit?`<em>${esc(unit)}</em>`:''}</div></label>`;
 }
 function featureName(f){return ({extrude:'Aufbauen',pocket:'Ausschneiden',fillet:'Rundung',chamfer:'Fase',shell:'Wandung'})[f.type]||f.type;}
 function featureIcon(f){return ({extrude:'extrude',pocket:'cut',fillet:'fillet',chamfer:'chamfer'})[f.type]||'sketch';}
@@ -203,6 +206,9 @@ function renderInspector(){
  inspectorDirty=false;
  const root=$('#inspector'),spec=currentSpec(),model=currentModel();
  if(sketch){renderSketchInspector();return;}
+ if(tool==='pattern'){renderPatternInspector();return;}
+ if(tool==='measure'){renderMeasureInspector();return;}
+ if(tool==='move'){renderMoveInspector();return;}
  if(selectedBodies.size>1){renderMultiInspector();return;}
  if(tool==='fillet'||tool==='chamfer'){
   const rounded=tool==='fillet';
@@ -237,6 +243,11 @@ async function applyDimensions(){
    for(const [key] of SHAPES[operand.kind]?.fields||[])operand.params[key]=inputNumber('operand-'+i+'-'+key);
    operand.position=['x','y','z'].map(axis=>inputNumber('operand-'+i+'-'+axis));
   }
+  if(spec.kind==='mirror'){
+   spec.axis=$('[data-mirror-axis]').value;spec.offset=inputNumber('mirror-offset');
+   spec.source.params??={};
+   for(const [key] of SHAPES[spec.source.kind]?.fields||[])spec.source.params[key]=inputNumber('mirror-source-'+key);
+  }
   spec.rotation=['x','y','z'].map(d=>inputNumber('rotation-'+d));spec.scale=inputNumber('scale');
   spec.position=['x','y','z'].map(d=>inputNumber('position-'+d));
   await commit(next,{message:'Maße übernommen'});
@@ -266,12 +277,16 @@ async function applyEdge(){
 }
 function updateToolButtons(){
  $$('[data-tool]').forEach(b=>{b.classList.toggle('active',b.dataset.tool===tool);});
- $('#mode-pill').textContent=sketch?(sketchName(sketch.kind)+' aufziehen oder Maße eingeben'):tool==='fillet'?'Kanten für die Rundung auswählen':tool==='chamfer'?'Kanten für die Fase auswählen':tool==='move'?'Körper auf der XY-Ebene verschieben':'Körper oder Fläche auswählen';
+ $('#mode-pill').textContent=sketch?(sketchName(sketch.kind)+' aufziehen oder Maße eingeben'):tool==='fillet'?'Kanten für die Rundung auswählen':tool==='chamfer'?'Kanten für die Fase auswählen':tool==='move'?`Auswahl in ${moveSettings.plane.toUpperCase()} verschieben · Alt: ohne Raster · Esc: abbrechen`:'Körper oder Fläche auswählen';
  renderer.domElement.style.cursor=sketch?'crosshair':tool==='move'?'move':tool==='fillet'||tool==='chamfer'?'crosshair':'default';
+ if(tool==='pattern')$('#mode-pill').textContent='Kopien und Spiegeln · Körper auswählen, Maße rechts eingeben';
+ if(tool==='measure'){$('#mode-pill').textContent='Messen · zwei Körper anklicken oder über Häkchen auswählen';renderer.domElement.style.cursor='crosshair';}
 }
 function setTool(next){
  if(busy)return;
+ cancelMovePreview();
  if(next==='sketch'){startSketch();return;}
+ if(next==='measure')measurementResult=null;
  if(sketch&&!cancelSketch())return;tool=next;selectedEdges.clear();hoverEdge=null;selectedFeature=-1;renderSelection();renderInspector();updateToolButtons();
 }
 function startSketch(){
@@ -530,9 +545,14 @@ renderer.domElement.addEventListener('pointerdown',event=>{
  lastPointer={x:event.clientX,y:event.clientY};
  if(sketch){const point=sketchPoint(event);if(point){drag={kind:'sketch',start:point};renderer.domElement.setPointerCapture(event.pointerId);}return;}
  if(tool==='move'){
-  const hit=pickBody(event);if(!hit)return;selectObject(hit.object.userData.body);
-  const spec=currentSpec(),plane=new THREE.Plane(new THREE.Vector3(0,0,1),-(spec.position?.[2]||0)),start=new THREE.Vector3();pointerRay(event).intersectPlane(plane,start);
-  drag={kind:'move',plane,start,position:clone(spec.position||[0,0,0]),delta:new THREE.Vector3()};renderer.domElement.setPointerCapture(event.pointerId);
+  if(!$('[data-move-snap]')?.checkValidity()){toast('Bitte ein gültiges Verschieberaster eingeben.',true);return;}
+  const hit=pickBody(event);if(!hit)return;
+  if(!selectedBodies.has(hit.object.userData.body))selectObject(hit.object.userData.body);
+  const normal=vec(({xy:[0,0,1],xz:[0,1,0],yz:[1,0,0]})[moveSettings.plane]),ray=pointerRay(event);
+  if(Math.abs(ray.direction.dot(normal))<.02){toast('Die Verschiebeebene steht seitlich zur Ansicht. Bitte die Ansicht drehen oder eine andere Ebene wählen.',true);return;}
+  const plane=new THREE.Plane().setFromNormalAndCoplanarPoint(normal,hit.point),start=new THREE.Vector3();if(!ray.intersectPlane(plane,start))return;
+  selectedFace=null;renderSelection();
+  drag={kind:'move',plane,start,positions:selectedSpecs().map(o=>({id:o.id,position:clone(o.position??[0,0,0])})),delta:new THREE.Vector3()};renderer.domElement.setPointerCapture(event.pointerId);
  }
 });
 renderer.domElement.addEventListener('pointermove',event=>{
@@ -550,7 +570,10 @@ renderer.domElement.addEventListener('pointermove',event=>{
   sketch.hasDrawn=!isRadial(sketch.kind)?sketch.width>.05&&sketch.height>.05:sketch.radius>.05;syncSketchInputs();drawSketch();return;
  }
  if(drag?.kind==='move'){
-  const hit=new THREE.Vector3();if(!pointerRay(event).intersectPlane(drag.plane,hit))return;const delta=hit.sub(drag.start);delta.x=Math.round(delta.x);delta.y=Math.round(delta.y);delta.z=0;drag.delta.copy(delta);groups.get(selectedId)?.position.copy(delta);return;
+  const hit=new THREE.Vector3();if(!pointerRay(event).intersectPlane(drag.plane,hit))return;const delta=hit.sub(drag.start);
+  for(const axis of ['x','y','z']){if(!moveSettings.plane.includes(axis)||(moveSettings.axis!=='free'&&moveSettings.axis!==axis))delta[axis]=0;else if(!event.altKey&&moveSettings.snap>0)delta[axis]=Math.round(delta[axis]/moveSettings.snap)*moveSettings.snap;}
+  drag.delta.copy(delta);for(const item of drag.positions)groups.get(item.id)?.position.copy(delta);
+  const label=$('#move-delta');if(label)label.textContent=`Δ X ${fmt(delta.x,3)} · Y ${fmt(delta.y,3)} · Z ${fmt(delta.z,3)} mm`;return;
  }
  if(tool==='fillet'||tool==='chamfer'){
   const hit=pickEdge(event),next=hit?{body:hit.object.userData.body,id:hit.object.userData.edge}:null;
@@ -562,9 +585,19 @@ renderer.domElement.addEventListener('pointerup',async event=>{
  const moved=lastPointer?Math.hypot(event.clientX-lastPointer.x,event.clientY-lastPointer.y):0;
  if(drag?.kind==='sketch'){drag=null;syncSketchInputs();return;}
  if(drag?.kind==='move'){
-  const movement=drag;drag=null;if(movement.delta.length()>.05){const next=clone(project);next.objects.find(o=>o.id===selectedId).position=movement.position.map((p,i)=>p+movement.delta.getComponent(i));if(!await commit(next,{message:'Körper verschoben'}))groups.get(selectedId)?.position.set(0,0,0);}return;
+  const movement=drag;drag=null;
+  if(movement.delta.length()>1e-7){
+   const next=clone(project);for(const item of movement.positions)next.objects.find(o=>o.id===item.id).position=item.position.map((p,i)=>p+movement.delta.getComponent(i));
+   if(await commit(next,{message:'Auswahl verschoben'})){selectedBodies=new Set(movement.positions.map(o=>o.id));renderBodies();renderPanels();}
+   else for(const item of movement.positions)groups.get(item.id)?.position.set(0,0,0);
+  }else for(const item of movement.positions)groups.get(item.id)?.position.set(0,0,0);
+  return;
  }
  if(busy||sketch||moved>5)return;
+ if(tool==='measure'){
+  const hit=pickBody(event);if(!hit){selectObject(null);return;}
+  const id=hit.object.userData.body;selectObject(id,null,selectedBodies.has(id)||selectedBodies.size<2);return;
+ }
  if(tool==='fillet'||tool==='chamfer'){
   const hit=pickEdge(event);if(!hit)return;const id=hit.object.userData.body,edge=hit.object.userData.edge;
   if(id!==selectedId){selectedId=id;selectedBodies=new Set([id]);selectedEdges.clear();renderBodies();}
@@ -575,7 +608,7 @@ renderer.domElement.addEventListener('pointerup',async event=>{
  else selectObject(null);
 });
 renderer.domElement.addEventListener('dblclick',event=>{if(!sketch&&tool==='select'&&selectedFace?.planar)startSketch();});
-renderer.domElement.addEventListener('pointercancel',()=>{drag=null;groups.get(selectedId)?.position.set(0,0,0);});
+renderer.domElement.addEventListener('pointercancel',()=>{cancelMovePreview();drag=null;});
 controls.addEventListener('change',()=>{if(sketch?.hasDrawn)drawSketch();});
 
 async function addBody(kind){
@@ -670,13 +703,19 @@ document.addEventListener('click',async event=>{
   case 'pocket':applySketch('pocket');break;
   case 'show-body':selectedFeature=-1;renderPanels();break;
   case 'apply-feature':applyFeature();break;
+  case 'apply-pattern':applyBodyPattern();break;
+  case 'measure-distance':measureSelectedBodies();break;
   case 'delete-body':{if(!currentSpec()||busy)return;const next=clone(project);next.objects=next.objects.filter(o=>o.id!==selectedId);await commit(next,{message:'Körper gelöscht · Strg Z zum Wiederherstellen'});break;}
  }
  if(!event.target.closest('.export-wrap'))$('#export-menu').hidden=true;
 });
 $('#inspector').addEventListener('input',event=>{
+ if(event.target.hasAttribute('data-move-plane')){moveSettings.plane=event.target.value;if(!moveSettings.plane.includes(moveSettings.axis))moveSettings.axis='free';renderMoveInspector();updateToolButtons();return;}
+ if(event.target.hasAttribute('data-move-axis')){moveSettings.axis=event.target.value;return;}
+ if(event.target.hasAttribute('data-move-snap')){const value=Number(event.target.value),valid=event.target.value!==''&&Number.isFinite(value)&&value>=0&&value<=10000;event.target.setCustomValidity(valid?'':'Raster zwischen 0 und 10000 mm eingeben.');if(valid)moveSettings.snap=value;return;}
  if(event.target.id==='sketch-preview-enabled'&&sketchPreview){resetSketchPreviewWork();sketchPreview.enabled=event.target.checked;queueSketchPreview();return;}
  if(!sketch&&!event.target.matches('[data-profile-select]'))inspectorDirty=true;
+ if(event.target.hasAttribute('data-pattern-mode')){patternMode=event.target.value;renderPatternInspector();return;}
  if(event.target.dataset.field==='edge-size'){const n=Number(event.target.value);if(Number.isFinite(n)&&n>0)edgeSize=n;}
  if(event.target.hasAttribute('data-through-all')&&sketch){sketch.throughAll=event.target.checked;queueSketchDraft();queueSketchPreview();return;}
  if(event.target.hasAttribute('data-distance-reference')){if(sketch){sketch.distanceReference=event.target.value;syncSketchInputs();drawSketch();}return;}
@@ -689,7 +728,7 @@ $('#inspector').addEventListener('input',event=>{
  if(event.target.dataset.lock){sketch.locks[event.target.dataset.lock]=event.target.checked;queueSketchDraft();return;}
  if(event.target.dataset.sketch)setSketchDimension(event.target.dataset.sketch,event.target.value,event.target);
 });
-$('#inspector').addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('input')&&!sketch&&!busy){event.preventDefault();if(event.target.dataset.field==='edge-size')applyEdge();else if(event.target.dataset.field==='shell-thickness')applyShell();else selectedFeature>=0?applyFeature():applyDimensions();}});
+$('#inspector').addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('input')&&!sketch&&!busy){event.preventDefault();if(tool==='pattern')applyBodyPattern();else if(event.target.dataset.field==='edge-size')applyEdge();else if(event.target.dataset.field==='shell-thickness')applyShell();else selectedFeature>=0?applyFeature():applyDimensions();}});
 $('#add-box').onclick=()=>addBody('box');$('#add-cylinder').onclick=()=>addBody('cylinder');
 $('#shape-library').innerHTML=Object.entries(SHAPES).filter(([kind])=>!['box','cylinder'].includes(kind)).map(([kind,s])=>`<button data-add-shape="${kind}" title="${s.name}" aria-label="${s.name}"><img src="./shapes/${kind}.png" alt="" width="128" height="96" draggable="false">${s.name}</button>`).join('');
 $('#plane-sketch').onclick=()=>startPlaneSketch();
@@ -778,7 +817,55 @@ setupSession({
  view(){renderer.render(scene,camera);return renderer.domElement.toDataURL('image/png').split(',')[1];},
 });
 
+function cancelMovePreview(){
+ if(drag?.kind!=='move')return;
+ for(const item of drag.positions)groups.get(item.id)?.position.set(0,0,0);drag=null;
+ const label=$('#move-delta');if(label)label.textContent='Verschiebung abgebrochen.';
+}
+function renderMoveInspector(){
+ $('#inspector').innerHTML=`<div class="inspector-heading">AUSWAHL VERSCHIEBEN${icon('move')}</div><div class="inspector-content"><p class="tool-description">${selectedBodies.size} Körper ausgewählt. Einen ausgewählten Körper ziehen, um alle gemeinsam zu verschieben.</p><label class="field"><span>Verschiebeebene</span><select data-move-plane>${['xy','xz','yz'].map(p=>`<option value="${p}" ${moveSettings.plane===p?'selected':''}>${p.toUpperCase()}</option>`).join('')}</select></label><label class="field"><span>Richtung</span><select data-move-axis><option value="free" ${moveSettings.axis==='free'?'selected':''}>Frei in der Ebene</option>${[...moveSettings.plane].map(a=>`<option value="${a}" ${moveSettings.axis===a?'selected':''}>Nur ${a.toUpperCase()}</option>`).join('')}</select></label><label class="field"><span>Verschieberaster · mm</span><input type="number" data-move-snap value="${moveSettings.snap}" min="0" max="10000" step="any"></label><p class="tip">0 oder gedrückte Alt-Taste bewegt frei. Esc verwirft die laufende Bewegung. Zum Verschieben in Z die Ebene XZ oder YZ wählen.</p><p id="move-delta" role="status">Körper im 3D-Bereich ziehen.</p><button class="subtle-button" data-action="cancel-tool">Zurück</button></div>`;
+}
+function axisSelect(attribute,value='z'){
+ return `<label class="field"><span>Achse / Ebenennormale</span><select ${attribute}>${['x','y','z'].map(a=>`<option value="${a}" ${a===value?'selected':''}>${a.toUpperCase()}${attribute==='data-mirror-axis'?' · '+({x:'YZ',y:'XZ',z:'XY'})[a]+'-Ebene':''}</option>`).join('')}</select></label>`;
+}
+function renderPatternInspector(){
+ const sources=selectedSpecs(),bounds=new THREE.Box3();
+ for(const source of sources){const model=models.find(m=>m.id===source.id);if(model){bounds.expandByPoint(vec(model.bounds.min));bounds.expandByPoint(vec(model.bounds.max));}}
+ const step=bounds.isEmpty()?20:bounds.max.x-bounds.min.x+5,offset=bounds.isEmpty()?0:bounds.max.x+5;
+ const modeOptions=[['linear','Lineare Kopien'],['circular','Kreiskopien'],['mirror','Spiegeln']];
+ $('#inspector').innerHTML=`<div class="inspector-heading">KOPIEREN & SPIEGELN${icon('pattern')}</div><div class="inspector-content"><p class="tool-description">${sources.length} Körper ausgewählt. Mehrere Körper über die Häkchen auswählen.</p><label class="field"><span>Werkzeug</span><select data-pattern-mode>${modeOptions.map(([mode,label])=>`<option value="${mode}" ${mode===patternMode?'selected':''}>${label}</option>`).join('')}</select></label>${patternMode==='mirror'?`${axisSelect('data-pattern-axis','x')}${field('Position der Spiegelebene','pattern-offset',offset)}<label class="locked-dimension"><input type="checkbox" id="pattern-keep-original" checked> Original behalten</label><p class="tip">Beispiel: Achse X und Position 0 spiegeln an der YZ-Ebene. Position in Weltkoordinaten.</p>`:`${field('Anzahl einschließlich Original','pattern-count',patternMode==='linear'?3:4,'','min="2" max="30" step="1"')}${patternMode==='linear'?`<div class="section-title">ABSTAND PRO KOPIE</div><div class="fields-3">${['x','y','z'].map(a=>field(a.toUpperCase(),'pattern-step-'+a,a==='x'?step:0)).join('')}</div><p class="tip">Die Abstände addieren sich pro Kopie. Negative Werte kehren die Richtung um.</p>`:`${axisSelect('data-pattern-axis','z')}<div class="section-title">DREHZENTRUM</div><div class="fields-3">${['x','y','z'].map(a=>field(a.toUpperCase(),'pattern-center-'+a,0)).join('')}</div>${field('Gesamtwinkel','pattern-angle',360,'°')}<label class="locked-dimension"><input type="checkbox" id="pattern-rotate" checked> Körper mitdrehen</label><p class="tip">360° verteilt gleichmäßig ohne doppelte Endkopie. Bei Teilkreisen liegen Original und letzte Kopie an den Winkelgrenzen.</p>`}`}<button class="primary" data-action="apply-pattern" ${sources.length?'':'disabled'}>${patternMode==='mirror'?'Spiegelung übernehmen':'Kopien erstellen'}</button><button class="subtle-button" data-action="cancel-tool">Zurück</button><p class="tip">Kopien bleiben einzeln bearbeitbar und sind unabhängig vom Original. Ein Schritt lässt sich mit Strg Z rückgängig machen. Maximal 30 Körper pro Projekt.</p></div>`;
+}
+async function applyBodyPattern(){
+ if(busy||sketch||!selectedSpecs().length)return;
+ try{
+  const options={mode:patternMode};
+  if(patternMode==='mirror'){options.axis=$('[data-pattern-axis]').value;options.offset=inputNumber('pattern-offset');options.keepOriginal=$('#pattern-keep-original').checked;}
+  else{
+   options.count=inputNumber('pattern-count');
+   if(patternMode==='linear')options.step=['x','y','z'].map(a=>inputNumber('pattern-step-'+a));
+   else{options.axis=$('[data-pattern-axis]').value;options.center=['x','y','z'].map(a=>inputNumber('pattern-center-'+a));options.angle=inputNumber('pattern-angle');options.rotate=$('#pattern-rotate').checked;}
+  }
+  const result=createBodyPattern(project,selectedSpecs().map(o=>o.id),options);
+  if(await commit(result.project,{fit:true,message:patternMode==='mirror'?'Spiegelung erstellt':'Kopien erstellt'})){
+   tool='select';selectedId=result.ids[0];selectedBodies=new Set(result.ids);renderBodies();renderPanels();
+  }
+ }catch(error){toast(error.message,true);}
+}
+function measurementKey(){return JSON.stringify([activeProjectId,projectRevision,[...selectedBodies].sort()]);}
+function renderMeasureInspector(){
+ const selected=selectedSpecs(),result=measurementResult?.key===measurementKey()?measurementResult:null;
+ $('#inspector').innerHTML=`<div class="inspector-heading">MESSEN${icon('measure')}</div><div class="inspector-content"><p class="tool-description">Ein Körper zeigt Außenmaße, Oberfläche und Volumen. Für den kleinsten Abstand zwei Körper anklicken oder über die Häkchen auswählen.</p>${selected.map(spec=>{const model=models.find(m=>m.id===spec.id);if(!model)return '';return `<section class="measurement-card"><h3>${esc(spec.name)}</h3><dl>${['x','y','z'].map((a,i)=>`<div><dt>Außenmaß ${a.toUpperCase()}</dt><dd>${fmt(model.bounds.max[i]-model.bounds.min[i],3)} mm</dd></div>`).join('')}<div><dt>Oberfläche</dt><dd>${fmt(model.faces.reduce((sum,f)=>sum+f.area,0),3)} mm²</dd></div><div><dt>Volumen</dt><dd>${fmt(model.volume,3)} mm³</dd></div></dl></section>`;}).join('')}${selected.length===2?`<button class="primary" data-action="measure-distance">Kleinsten Abstand berechnen</button>`:`<p class="tip">${selected.length>2?'Bitte genau zwei Körper für die Abstandsmessung auswählen.':'Der Abstand wird zwischen den CAD-Körpern gemessen.'}</p>`}${result?`<div class="measurement-result" role="status" data-measure-distance="${result.distance}"><span>Kleinster Körperabstand</span><strong>${fmt(result.distance,4)} mm</strong></div><p class="tip">0 mm bedeutet Berührung oder Überlappung. Dies ist keine Messung der Überdeckungstiefe.</p>`:''}<button class="subtle-button" data-action="cancel-tool">Zurück</button></div>`;
+}
+async function measureSelectedBodies(){
+ if(busy||sketch||selectedBodies.size!==2)return;
+ const [first,second]=selectedSpecs().map(o=>o.id),key=measurementKey();setBusy(true);
+ try{const result=await calculate('measure',{project:clone(project),first,second});measurementResult={key,...result};if(tool==='measure')renderMeasureInspector();}
+ catch(error){toast(error.message,true);}
+ finally{setBusy(false);}
+}
+
 function bodyParameterFields(spec){
+ if(spec.kind==='mirror')return `<div class="section-title">SPIEGELUNG</div>${axisSelect('data-mirror-axis',spec.axis)}${field('Position der Spiegelebene','mirror-offset',spec.offset)}<p class="tip">Unabhängige Spiegelkopie von ${esc(spec.source.name||'Körper')}. Die Ebene bezieht sich auf die gespeicherte Ausgangsgeometrie.</p>${(SHAPES[spec.source.kind]?.fields||[]).map(([key,label])=>field('Quelle · '+label,'mirror-source-'+key,spec.source.params?.[key]??SHAPES[spec.source.kind].params[key],['sides','teeth'].includes(key)?'':'mm')).join('')}`;
  if(SHAPES[spec.kind])return '<div class="section-title">MASSE DES GRUNDKÖRPERS</div>'+SHAPES[spec.kind].fields.map(([key,label])=>field(label,key,spec.params[key]??SHAPES[spec.kind].params[key],['sides','teeth'].includes(key)?'':'mm')).join('');
  if(spec.kind==='boolean')return `<div class="section-title">AUSGANGSFORMEN · ${esc(({union:'Vereint',cut:'Ausgeschnitten',intersect:'Schnittmenge',hull:'Konvexe Hülle'})[spec.operation])}</div>`+spec.operands.map((o,i)=>`<details class="operand-editor"><summary>${esc(o.name||shapeName(o.kind))}</summary>${(SHAPES[o.kind]?.fields||[]).map(([key,label])=>field(label,'operand-'+i+'-'+key,o.params?.[key]??SHAPES[o.kind].params[key],['sides','teeth'].includes(key)?'':'mm')).join('')}<div class="fields-3">${['x','y','z'].map((axis,n)=>field(axis.toUpperCase(),'operand-'+i+'-'+axis,o.position?.[n]||0)).join('')}</div></details>`).join('');
  if(spec.kind==='profile'){const profiles=[spec.profile,...(spec.contours??[])],s=profiles[Math.min(selectedContour,profiles.length-1)];return `${profileSelector(profiles)}${spec.contours?field('Mitte U','profile-u',s.center?.[0]??0)+field('Mitte V','profile-v',s.center?.[1]??0):''}<div class="section-title">SKIZZE · ${esc(sketchName(s.kind))}</div>${isRadial(s.kind)?field('Radius','profile-radius',s.radius):field('Breite','profile-width',s.width)+field('Höhe','profile-height',s.height)}${s.kind==='polygon'?field('Seiten','profile-sides',s.sides,''):''}${field('Winkel','profile-angle',s.angle||0,'°')}${field('Aufbauhöhe','height',spec.params.height)}`;}

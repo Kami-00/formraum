@@ -14,6 +14,6 @@ export const SHAPES={
  prism:{name:'Vieleck-Prisma',symbol:'⬡',color:'#8eadd0',params:{radius:14,sides:6,height:20},fields:[['radius','Umkreisradius'],['sides','Seiten'],['height','Höhe']]},
  capsule:{name:'Kapsel',symbol:'⬭',color:'#a6b982',params:{radius:8,height:30},fields:[['radius','Radius'],['height','Gesamthöhe']]},
 };
-export const shapeName=kind=>SHAPES[kind]?.name||({imported:'STEP-Körper',boolean:'Kombination',profile:'Skizzenkörper'})[kind]||kind;
+export const shapeName=kind=>SHAPES[kind]?.name||({imported:'STEP-Körper',boolean:'Kombination',profile:'Skizzenkörper',mirror:'Gespiegelter Körper'})[kind]||kind;
 export const sketchName=kind=>({rectangle:'Rechteck',circle:'Kreis',ellipse:'Ellipse',polygon:'Vieleck'})[kind]||kind;
 export const isRadial=kind=>kind==='circle'||kind==='polygon';

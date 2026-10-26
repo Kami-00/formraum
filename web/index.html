@@ -33,6 +33,8 @@
  <symbol id="i-cut" viewBox="0 0 24 24"><path d="m3 6 9-4 9 4v13l-9 4-9-4zM3 6l9 4 9-4M12 10v7m-3-3 3 3 3-3"/></symbol>
  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L20 5"/></symbol>
  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+ <symbol id="i-pattern" viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></symbol>
+ <symbol id="i-measure" viewBox="0 0 24 24"><path d="m3 16 13-13 5 5L8 21zM7 12l2 2m2-6 2 2m2-6 2 2"/></symbol>
 </defs></svg>
 
 <header class="topbar">
@@ -66,11 +68,13 @@
  <main class="viewport-wrap">
   <nav class="tool-strip" aria-label="CAD-Werkzeuge">
    <button data-tool="select" class="tool active" title="Auswählen · V"><svg><use href="#i-select"/></svg><span>Auswahl</span></button>
-   <button data-tool="move" class="tool" title="Auf der XY-Ebene verschieben · M"><svg><use href="#i-move"/></svg><span>Verschieben</span></button>
+   <button data-tool="move" class="tool" title="Auswahl mit Ebene, Achse und Raster verschieben · M"><svg><use href="#i-move"/></svg><span>Verschieben</span></button>
    <span class="tool-divider"></span>
    <button data-tool="sketch" class="tool" title="Skizze auf ausgewählter Fläche · S"><svg><use href="#i-sketch"/></svg><span>Skizze</span></button>
    <button data-tool="fillet" class="tool" title="Kanten abrunden"><svg><use href="#i-fillet"/></svg><span>Rundung</span></button>
    <button data-tool="chamfer" class="tool" title="Kanten anfasen"><svg><use href="#i-chamfer"/></svg><span>Fase</span></button>
+   <button data-tool="pattern" class="tool" title="Lineare Kopien, Kreiskopien und Spiegeln"><svg><use href="#i-pattern"/></svg><span>Kopieren</span></button>
+   <button data-tool="measure" class="tool" title="Maße und Körperabstände messen"><svg><use href="#i-measure"/></svg><span>Messen</span></button>
   </nav>
   <div id="viewport" aria-label="3D-Zeichenbereich"></div>
   <div class="viewport-topline"><span id="mode-pill">Körper oder Fläche auswählen</span><span id="busy-badge" hidden><i></i>Berechne Geometrie</span></div>

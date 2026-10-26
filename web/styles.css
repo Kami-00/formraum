@@ -27,3 +27,4 @@
 #sketch-preview-status{font-size:12px;line-height:1.45;margin:8px 0;color:#526d74}
 #sketch-preview-status[data-state="error"]{color:#a34432}
 #sketch-preview-status[data-state="ready"]{color:#146556}
+.measurement-card{padding:10px 0;border-bottom:1px solid var(--line)}.measurement-card h3{font-size:13px;margin:0 0 8px}.measurement-card dl{margin:0}.measurement-card dl>div{display:flex;justify-content:space-between;gap:6px;font-size:12px;margin:6px 0}.measurement-card dd{margin:0;text-align:right}.measurement-card dt{color:var(--muted)}.measurement-result{display:flex;flex-direction:column;gap:4px;padding:14px;margin:12px 0;background:var(--accent);border-radius:7px}.measurement-result strong{font-size:24px;color:var(--teal)}.tool-strip{max-width:calc(100% - 24px);overflow-x:auto}

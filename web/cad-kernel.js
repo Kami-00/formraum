@@ -1,6 +1,6 @@
 import {
   makeBox, makeCylinder, makeSphere, makeFace, draw, drawRectangle, drawCircle, drawEllipse, drawPolysides, cast, Plane, EdgeFinder, FaceFinder,
-  measureVolume, measureArea, measureShapeLinearProperties,
+  measureVolume, measureArea, measureShapeLinearProperties, measureDistanceBetween,
   importSTEP, exportSTEP, makeCompound,
 } from 'replicad';
 import {positionedCenter} from './sketch-position.js';
@@ -243,6 +243,11 @@ export function createKernel(oc){
           }
         }}finally{parts.forEach(part=>part.delete());}
       }
+      else if(spec.kind==='mirror'){
+        const axis={x:[1,0,0],y:[0,1,0],z:[0,0,1]}[spec.axis];if(!Array.isArray(axis))fail('Spiegelachse X, Y oder Z erwartet.');
+        const offset=number(spec.offset??0,'Spiegelebene'),source=await buildObject(object(spec.source,'Spiegelquelle'),depth+1,false,budget);
+        try{shape=source.mirror(axis,mul(axis,offset));}finally{source.delete();}
+      }
       else if(spec.kind==='imported')shape=await importSTEP(decodeSTEP(spec.sourceBase64));
       else fail('Unbekannter Grundkörper.');
       validate(shape);
@@ -352,6 +357,17 @@ export function createKernel(oc){
   return async(operation,payload)=>{
     if(operation==='ready')return {ok:true};
     if(operation==='model')return modelResponse(payload.project);
+    if(operation==='measure'){
+      if(typeof payload.first!=='string'||typeof payload.second!=='string'||payload.first===payload.second)fail('Zwei unterschiedliche Körper zum Messen wählen.');
+      const {models}=await buildProject(payload.project);
+      try{
+        const first=models.find(m=>m.spec.id===payload.first),second=models.find(m=>m.spec.id===payload.second);
+        if(!first||!second)fail('Ein Messkörper fehlt im Projekt.');
+        const distance=measureDistanceBetween(first.shape,second.shape);
+        if(!Number.isFinite(distance)||distance<0)fail('Abstand konnte nicht berechnet werden.');
+        return {distance,unit:'mm'};
+      }finally{models.forEach(m=>dispose(m.shape));}
+    }
     if(operation==='import_step'){
       const shape=await importSTEP(decodeSTEP(payload.base64));let solids=[];
       try{

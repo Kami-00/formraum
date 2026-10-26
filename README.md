@@ -84,7 +84,17 @@ Neue Website-Versionen werden über **Neue Version · Neu laden** angeboten, sob
 
 ## Weiterer CAD-Ausbau
 
-Beide Arbeitsweisen bleiben gleich wichtig: direktes Formenbauen und präzises Konstruieren. Die nächsten größeren Bausteine sind freie Linien/Bögen, ein geometrischer Constraint-Solver (Koinzidenz, Parallelität, Tangentialität und Abstandsmaße zwischen Elementen), Spiegeln/Muster, Rotationskörper aus eigenen Skizzen und Loft/Sweep. Baugruppen und Zeichnungsableitung benötigen darauf aufbauende eigene Werkzeuge. Diese Funktionen sind noch nicht enthalten.
+Beide Arbeitsweisen bleiben gleich wichtig: direktes Formenbauen und präzises Konstruieren. Die [Ausbauliste](docs/CAD-AUSBAU.md) trennt vorhandene Funktionen von offenen Grundlagen und Ausbauschritten. Als nächstes fehlen insbesondere freie Linien/Bögen, ein geometrischer Constraint-Solver (Koinzidenz, Parallelität, Tangentialität und Abstandsmaße zwischen Elementen), assoziative Feature-Muster, Rotationskörper aus eigenen Skizzen und Loft/Sweep. Baugruppen und Zeichnungsableitung benötigen darauf aufbauende eigene Werkzeuge. Diese Funktionen sind noch nicht enthalten.
+
+### Kopieren, Spiegeln, Verschieben und Messen
+
+- **Kopieren → Lineare Kopien:** Einen oder mehrere Körper auswählen, Anzahl einschließlich Original sowie X-/Y-/Z-Abstand pro Kopie eingeben. Negative Abstände kehren die Richtung um.
+- **Kopieren → Kreiskopien:** Weltachse, Drehzentrum, Gesamtwinkel und Anzahl einstellen. Bei 360° wird die letzte Position nicht doppelt belegt. Ein Teilkreis enthält beide Winkelgrenzen. **Körper mitdrehen** legt fest, ob sich auch ihre Orientierung ändert.
+- **Kopieren → Spiegeln:** X-, Y- oder Z-Normale und Position der Spiegelebene wählen. Beispielsweise spiegelt X mit Position 0 an der YZ-Ebene. **Original behalten** erzeugt einen zusätzlichen Körper; ausgeschaltet ersetzt die Spiegelung die Auswahl. Die Spiegelquelle wird als unabhängiger Stand mitgespeichert. Spiegelebene und Grundmaße einer einfachen Quelle bleiben im Eigenschaftenfenster änderbar; weitere Skizzen und Bearbeitungen auf dem gespiegelten Körper sind möglich.
+- **Verschieben:** Eine Ebene (XY/XZ/YZ), optional nur eine ihrer Achsen und ein Raster wählen. Ziehen an einem ausgewählten Körper bewegt die ganze Auswahl und erhält ihre Abstände. Raster 0 oder Alt bewegt frei; Esc verwirft die laufende Bewegung. Zum Bewegen in Z XZ oder YZ wählen und die Ansicht entsprechend drehen.
+- **Messen:** Außenmaße in Weltachsen, Oberfläche und Volumen der Auswahl anzeigen. Bei genau zwei Körpern **Kleinsten Abstand berechnen** wählen. Der CAD-Kern berücksichtigt auch gekrümmte Flächen; die Messung verändert weder Projekt noch Undo-Historie. Abstand 0 steht für Berührung oder Überlappung und ist keine Überdeckungstiefe.
+
+Kopieraktionen bilden jeweils einen Undo-Schritt. Die neuen Körper sind unabhängige Kopien: Änderungen am Original werden nicht automatisch übertragen. Assoziative Körper-/Feature-Muster, freie Spiegelebenen, Punkt-/Kantenmessung und Kollisionsprüfung sind weitere Ausbauschritte. Die Grenze von 30 Körpern gilt auch für Kopien.
 
 ## Prüfungen
 
