@@ -1,5 +1,7 @@
 # Formraum · CAD im Browser
 
+**[Lokale Live-Vorschau öffnen](http://127.0.0.1:5173/)** · Erreichbar auf deinem Rechner, solange der lokale Entwicklungsserver läuft.
+
 Formraum läuft vollständig im Browser: Oberfläche, echte CAD-Volumenkörper, STEP-Import und STEP-/STL-Export. FreeCAD, Python und ein CAD-Backend werden nicht benötigt. Open CASCADE wird als WebAssembly in einem Web Worker ausgeführt; Projekt- und Modelldaten bleiben auf deinem Gerät. Alle Maße sind in Millimetern.
 
 ![Formraum mit Beispielbauteil und Maßfenster](docs/preview.jpg)
@@ -39,6 +41,10 @@ Für **GitHub Pages** ist `.github/workflows/pages.yml` vorbereitet: In den Repo
 
 **Öffnen** importiert Projekt- und STEP-Dateien als neues Projekt. **Speichern** lädt eine zusätzliche Projektdatei herunter. Browser-Speicher ist begrenzt und gehört zum jeweiligen Browserprofil und zur Website-Adresse; regelmäßig Dateien sichern. Speicherfehler oder Änderungen in einem anderen Tab werden sichtbar gemeldet und überschreiben nicht stillschweigend den vorherigen Stand. Rückgängig/Wiederholen bezieht sich auf die aktuelle Bearbeitungssitzung und wird beim Projektwechsel zurückgesetzt.
 
+Offene **Skizzenentwürfe** werden mit ihren Konturen, Maßen, Festlegungen und der ursprünglichen Modellversion separat im Browser gesichert. Nach einem Neuladen kannst du weiterzeichnen; **Speichern** nimmt den Entwurf auch in die Projektdatei auf. Unter **Projekte → Skizzenentwürfe** lassen sich weitere Sicherungen öffnen. Hat sich das Modell inzwischen geändert, wird der ursprüngliche Stand als eigenes Projekt wiederhergestellt. Entwürfe anderer Tabs und ältere Sicherungen werden dabei erhalten. **Skizze verwerfen** beendet den aktiven Entwurf ausdrücklich; bei einem Speicherfehler bleibt die Skizze ansonsten zum Sichern als Datei geöffnet.
+
+Ein beschädigter Projekteintrag blockiert die übrigen Projekte nicht. Unter **Projekte → Beschädigte Sicherungen** lassen sich seine unveränderten Rohdaten herunterladen. Während einer offenen Skizze sind andere Modelländerungen gesperrt, damit deren Bezugsfläche erhalten bleibt.
+
 ## Gemeinsam mit einer KI arbeiten
 
 Über **KI verbinden** kann jeder Nutzer einen lokalen MCP-Client mit dem geöffneten Tab koppeln. Die optionale Node.js-Brücke stellt acht MCP-Werkzeuge bereit: Projekte auflisten/öffnen/anlegen, aktives Modell und Ansicht lesen, geprüfte Änderungen vornehmen und rückgängig machen. Sitzungscode, explizites Verbinden und Revisionsprüfung verhindern Zugriff ohne Kopplung und veraltete Schreibversuche. Die reine Browser-Anwendung braucht weiterhin keine Installation.
@@ -49,7 +55,7 @@ Die [MCP-Anleitung](docs/MCP.md) enthält die Einrichtung für Codex und andere 
 
 1. **Körper wählen:** Quader, Zylinder, Kugel, Kegel/Kegelstumpf, Rohr, Ring, Keil, Pyramide, Vieleck-Prisma oder Kapsel hinzufügen. Maße, Position, Drehung (X → Y → Z) und gleichmäßige Skalierung rechts bearbeiten. Duplizieren und Auf Boden erleichtern das Platzieren.
 2. **Skizze anlegen:** Eine ebene Fläche anklicken und **Skizze** aktivieren, oder **Skizze auf Grundebene** für einen eigenen Körper. Rechteck, Kreis, Ellipse oder regelmäßiges Vieleck zeichnen. Maße direkt an der Kontur anklicken oder rechts eingeben. Eingegebene Konturmaße werden beim Zeichnen festgehalten; das Häkchen löst die Festlegung. Mittelpunkt, Winkel, Polygonseiten und Fangraster sind einstellbar.
-3. **Bearbeiten:** Höhe beziehungsweise Tiefe angeben und die Skizze **Aufbauen** oder **Ausschneiden** lassen. **Durch alles** schneidet durch die gesamte Körperausdehnung und wird bei Änderungen neu berechnet.
+3. **Bearbeiten:** Höhe beziehungsweise Tiefe angeben. Die **Live-Vorschau** zeigt das berechnete Ergebnis für **Aufbauen** oder **Ausschneiden**, auch mit mehreren Konturen und **Durch alles**. Über **3D ansehen** lässt sich die Tiefe kontrollieren und die Ansicht mit der rechten Maustaste drehen; **Zur Skizzenansicht** kehrt zur Zeichenebene zurück. Erst die Schaltfläche **Aufbauen** beziehungsweise **Ausschneiden** unterhalb der Vorschau übernimmt die Änderung ins Modell. Ungültige Geometrie wird gemeldet und erhält das bisherige Modell. Die Vorschau lässt sich ausschalten; sie verwendet einen eigenen, bei Bedarf gestarteten CAD-Worker.
 4. **Kanten bearbeiten:** **Rundung** oder **Fase** wählen, Kanten anklicken und Radius beziehungsweise Fasenmaß eingeben.
 5. **Kombinieren:** Mehrere Körper per Häkchen oder Umschalt-Klick auswählen. Ausrichten bezieht sich auf den zuerst ausgewählten Körper. Vereinen, Von Basis abziehen und Schnittmenge verbinden Formen. **Gruppieren** vereint feste Körper und zieht als **Bohrung** markierte Körper ab. Ausgangsformen bleiben in der Kombination gespeichert; ihre Grundmaße und Positionen lassen sich dort bearbeiten. Ohne weitere Modellschritte lässt sich die Kombination auflösen. Alle Ergebnisse müssen zusammenhängend sein. Bohrkörper allein erscheinen nicht im Export.
 6. **Sichern:** **Speichern** lädt eine bearbeitbare `.formraum.json`-Datei herunter. **Exportieren** erzeugt STEP für andere CAD-Systeme oder STL für den 3D-Druck. **Öffnen** unterstützt Projektdateien und STEP (`.step`, `.stp`).
@@ -66,7 +72,7 @@ Ein vollständiges Beispiel mit vier bemaßten Durchgangsbohrungen liegt in `exa
 
 Rechts ziehen dreht, das Mausrad zoomt, die mittlere Maustaste verschiebt die Ansicht. **F** passt das Modell ein. **Strg Z** macht einen Schritt rückgängig, **Strg Y** stellt ihn wieder her. Unter macOS funktioniert auch Cmd. **Oben**, **Vorn** und **Rechts** helfen beim Zeichnen.
 
-`examples/Beispielbauteil.formraum.json` enthält Aufbau, Kreistasche, Rundung und Fase; die passenden STEP-/STL-Dateien liegen daneben. Das vorhandene Projektformat Version 1 bleibt erhalten. Geometriebezüge werden anhand von Fläche, Normalen, Schwerpunkt und Kantenendpunkten geprüft und bei geänderter Open-CASCADE-Reihenfolge eindeutig zugeordnet. Nicht eindeutig zuordenbare Bezüge werden abgewiesen; die letzte gültige Geometrie bleibt erhalten. Alte Dateien ohne Geometrieanker erhalten diese nach erfolgreichem Aufbau.
+`examples/Beispielbauteil.formraum.json` enthält Aufbau, Kreistasche, Rundung und Fase; die passenden STEP-/STL-Dateien liegen daneben. Das vorhandene Projektformat Version 1 bleibt erhalten. Ebene Flächen werden über ihre Außenkontur, Lage und Normale zugeordnet; innere Bohrungen verschieben ihren Skizzenursprung nicht. Kantenbezüge werden über Geometrie und Endpunkte geprüft. Änderungen der Open-CASCADE-Reihenfolge werden eindeutig zugeordnet. Nicht eindeutig zuordenbare Bezüge werden abgewiesen; die letzte gültige Geometrie bleibt erhalten. Alte Bezüge werden beim erfolgreichen Laden unter Erhalt der Konturpositionen aktualisiert. Bereits inkonsistente alte Referenzen ohne Außenkontur-Daten lassen sich nicht sicher automatisch rekonstruieren.
 
 ## Daten und Grenzen
 
