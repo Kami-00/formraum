@@ -45,5 +45,7 @@ test('built app works on a static subpath and offline, including CAD export',asy
   const free={version:1,name:'Offline Rotation',sketches:[{id:'s',name:'Profil',entities}],objects:[{id:'r',kind:'region',sketchId:'s',regions:findRegions(entities).map(r=>r.id),params:{revolveAngle:360,axisOffset:0},features:[]}]};
   await page.locator('#project-file').setInputFiles({name:'offline.formraum.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(free))});await expect(page.locator('#project-name')).toHaveValue('Offline Rotation');
   await page.locator('#region-sketch-list button').click();await page.locator('[data-rs-action="preview"]').click();await expect(page.locator('#region-result')).toContainText('Gültiger Rotationskörper');await page.locator('[data-rs-action="close"]').click();
+  await page.locator('#open-assembly').click();await page.locator('[data-eng="new-joint"]').click();await page.locator('#eng-value').fill('8');await page.locator('[data-eng="apply"]').click();await expect(page.locator('#engineering-dialog')).not.toBeVisible();
+  await page.locator('#open-bindings').click();await expect(page.locator('#eng-measure')).toBeVisible();await page.locator('[data-eng="close"]').last().click();
   expect(errors).toEqual([]);expect(failures).toEqual([]);expect(requests.every(r=>r.method==='GET'&&r.url.startsWith(url))).toBe(true);
 });

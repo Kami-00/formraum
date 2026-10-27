@@ -6,11 +6,12 @@ const browser=await chromium.launch();
 try{
  const page=await browser.newPage();
  await page.goto('http://127.0.0.1:5173/');
- const previews=await page.evaluate(async()=>{
+ const kinds=process.argv.slice(2);
+ const previews=await page.evaluate(async(kinds)=>{
   const THREE=await import('/vendor/three.module.js');
   const {SHAPES}=await import('/shapes.js');
   const {calculate}=await import('/cad-client.js');
-  const objects=Object.entries(SHAPES).filter(([kind])=>!['box','cylinder'].includes(kind)).map(([kind,s])=>({id:kind,kind,params:s.params}));
+  const objects=Object.entries(SHAPES).filter(([kind])=>!kinds.length||kinds.includes(kind)).map(([kind,s])=>({id:kind,kind,params:s.params}));
   const result=await calculate('model',{project:{version:1,objects}});
   const renderer=new THREE.WebGLRenderer({alpha:true,antialias:true,preserveDrawingBuffer:true});
   renderer.setSize(256,192);renderer.outputColorSpace=THREE.SRGBColorSpace;
@@ -31,7 +32,7 @@ try{
    scene.remove(mesh,lines);geometry.dispose();material.dispose();edges.dispose();edgeMaterial.dispose();
   }
   renderer.dispose();return output;
- });
+ },kinds);
  await mkdir(new URL('../web/public/shapes/',import.meta.url),{recursive:true});
  for(const [kind,data] of Object.entries(previews))await writeFile(new URL(`../web/public/shapes/${kind}.png`,import.meta.url),Buffer.from(data,'base64'));
  console.log(`Generated ${Object.keys(previews).length} CAD shape previews.`);

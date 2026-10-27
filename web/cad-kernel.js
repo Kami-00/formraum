@@ -1,3 +1,8 @@
+import {cutSurfaceTexture} from './surface-texture.js';
+import {gripLayout} from './grip.js';
+import {assemble} from './assembly.js';
+import {solveSketch} from './sketch-solver.js';
+import {sketchPlane,patternTransforms} from './model-geometry.js';
 import {findRegions,validateEntities,regionAxis,assertAxisOutside,edgePoint} from './sketch-regions.js';
 import {expandGenerators} from './generators.js';
 import {
@@ -202,6 +207,22 @@ export function createKernel(oc){
       const ready=result;result=null;return ready;
     }finally{normal?.delete();result?.delete();solids.forEach(p=>p.delete());holes.forEach(p=>p.delete());}
   }
+  function regionTool(spec,budget,override){
+    const source=budget.sketches?.get(spec.sketchId);if(!source)fail('Die freie Quellskizze fehlt.');
+    if(!Array.isArray(spec.regions)||!spec.regions.length||spec.regions.length>32||new Set(spec.regions).size!==spec.regions.length)fail('1 bis 32 unterschiedliche Flächen auswählen.');
+    const regions=findRegions(source.entities),f=sketchPlane(override??source.plane),plane=new Plane(f.origin,f.u,f.normal),params=spec.params??{},operation=spec.operation??'revolve';let shape;
+    const axis=regionAxis(spec,source.entities),angle=number(params.revolveAngle??360,'Rotationswinkel',.01);if(angle>360)fail('Rotationswinkel höchstens 360°.');
+    const origin=add(f.origin,add(mul(f.u,axis.origin[0]),mul(f.v,axis.origin[1]))),direction=add(mul(f.u,axis.direction[0]),mul(f.v,axis.direction[1]));
+    const loopSolid=loop=>{const pen=draw(loop[0].a);for(const edge of loop)if(edge.kind==='line')pen.lineTo(edge.b);else pen.threePointsArcTo(edge.b,edgePoint(edge,.5));const sketch=pen.close().sketchOnPlane(plane);try{if(operation==='revolve')return sketch.revolve(direction,{origin,angle});if(operation!=='extrude')fail('Unbekannte Flächenoperation.');const height=number(params.height??10,'Aufbauhöhe');if(Math.abs(height)<.01)fail('Aufbauhöhe mindestens 0,01 mm.');return sketch.extrude(height);}finally{sketch.delete();}};
+    try{for(const [i,id] of spec.regions.entries()){
+      const region=regions.find(r=>r.id===id)||regions.find(r=>r.topologyId===spec.regionKeys?.[i]);if(!region)fail('Eine ausgewählte Skizzenfläche hat sich geändert. Freie Skizze öffnen und die Flächen erneut auswählen.');
+      if(operation==='revolve')assertAxisOutside(region,axis);let solid;
+      try{solid=loopSolid(region.outer);for(const hole of region.holes){const cut=loopSolid(hole);try{const next=solid.cut(cut);solid.delete();solid=next;}finally{cut.delete();}}const next=shape?shape.fuse(solid):solid.clone();shape?.delete();shape=next;}finally{solid?.delete();}
+    }const ready=shape;shape=null;return ready;}finally{shape?.delete();plane.delete();}
+  }
+  function applyPatternTool(shape,tool,operation,pattern){
+    let result=shape.clone();try{for(const transform of patternTransforms(pattern)){let copy=tool.clone();try{if(transform.angle)copy=copy.rotate(transform.angle,transform.center,transform.axis);copy=copy.translate(transform.translation);const next=operation==='cut'?result.cut(copy):result.fuse(copy);result.delete();result=next;}finally{copy.delete();}}validate(result);if(Math.abs(measureVolume(result)-measureVolume(shape))<EPS)fail('Bearbeitung berührt den Körper nicht oder ändert kein Volumen.');const ready=result;result=null;return ready;}finally{result?.delete();}
+  }
   async function buildObject(spec,depth=0,keepLocal=false,budget={count:0}){
     if(++budget.count>150)fail('Maximal 150 Ausgangskörper einschließlich Kombinationen möglich.');
     if(depth>8)fail('Maximal acht verschachtelte Kombinationen möglich.');
@@ -237,27 +258,7 @@ export function createKernel(oc){
           try{first=c.fuse(a);shape=first.fuse(b);}finally{first?.delete();a.delete();b.delete();c.delete();}
         }
       }
-      else if(spec.kind==='region'){
-        const source=budget.sketches?.get(spec.sketchId);if(!source)fail('Die freie Quellskizze fehlt.');
-        if(!Array.isArray(spec.regions)||!spec.regions.length||spec.regions.length>32||new Set(spec.regions).size!==spec.regions.length)fail('1 bis 32 unterschiedliche Flächen zum Rotieren auswählen.');
-        const regions=findRegions(source.entities),axis=regionAxis(spec,source.entities),angle=number(params.revolveAngle??360,'Rotationswinkel',.01);
-        if(angle>360)fail('Rotationswinkel höchstens 360°.');
-        const direction=[axis.direction[0],0,axis.direction[1]],origin=[axis.origin[0],0,axis.origin[1]];
-        const loopSolid=loop=>{
-          const pen=draw(loop[0].a);
-          for(const edge of loop)if(edge.kind==='line')pen.lineTo(edge.b);else pen.threePointsArcTo(edge.b,edgePoint(edge,.5));
-          return pen.close().sketchOnPlane('XZ').revolve(direction,{origin,angle});
-        };
-        for(const id of spec.regions){
-          const region=regions.find(r=>r.id===id);if(!region)fail('Eine ausgewählte Skizzenfläche hat sich geändert. Freie Skizze öffnen und die Flächen erneut auswählen.');
-          assertAxisOutside(region,axis);let solid;
-          try{
-            solid=loopSolid(region.outer);
-            for(const hole of region.holes){const cut=loopSolid(hole);try{const next=solid.cut(cut);solid.delete();solid=next;}finally{cut.delete();}}
-            const next=shape?shape.fuse(solid):solid.clone();shape?.delete();shape=next;
-          }finally{solid?.delete();}
-        }
-      }
+      else if(spec.kind==='region')shape=regionTool(spec,budget);
       else if(spec.kind==='profile'){
         const plane=spec.plane??'XY';if(!['XY','XZ','YZ'].includes(plane))fail('Unbekannte Skizzenebene.');
         const multiple=spec.contours!=null;if(multiple&&!Array.isArray(spec.contours))fail('Konturliste erwartet.');
@@ -314,14 +315,18 @@ export function createKernel(oc){
       spec.features=features;
       if(spec.rollback!=null&&(!Number.isInteger(spec.rollback)||spec.rollback<0||spec.rollback>features.length))fail('Ungültige Position im Modellverlauf.');
       for(const [i,feature] of features.entries()){
-        object(feature,'Bearbeitung');
+        object(feature,'Bearbeitung');if(feature.pattern&&!['extrude','pocket','region'].includes(feature.type))fail('Muster unterstützen Aufbau, Ausschneiden und freie Skizzenbearbeitungen.');
         if(feature.suppressed!=null&&typeof feature.suppressed!=='boolean')fail('Unterdrücken muss ein Wahrheitswert sein.');
         if(i>=(spec.rollback??features.length))break;
         if(feature.suppressed)continue;
         let next,prism;const entities=[];
         try{
           object(feature,'Bearbeitung');const bb=bounds(shape);
-          if(feature.type==='extrude'||feature.type==='pocket'){
+          if(feature.type==='region'){
+            let supportFrame;
+            if(feature.reference||feature.face!=null){const faces=shape.faces;entities.push(...faces);const support=resolve(faces,feature.face,feature.reference,bb,'face');feature.face=support.index;feature.reference=support.reference;supportFrame=frame(support.entity);}
+            const toolSpec=feature.combine==='cut'&&feature.operation==='extrude'&&supportFrame?{...feature,params:{...feature.params,height:-(feature.params?.height??10)}}:feature;prism=regionTool(toolSpec,budget,supportFrame);next=applyPatternTool(shape,prism,feature.combine??'add',feature.pattern);
+          }else if(feature.type==='extrude'||feature.type==='pocket'){
             const faces=shape.faces;entities.push(...faces);
             const support=resolve(faces,feature.face,feature.reference,bb,'face');
             feature.face=support.index;feature.reference=support.reference;
@@ -340,9 +345,22 @@ export function createKernel(oc){
               finally{plane.delete();}
             });
             const before=measureVolume(shape);
-            next=feature.type==='extrude'?shape.fuse(prism):shape.cut(prism);
+            next=applyPatternTool(shape,prism,feature.type==='extrude'?'add':'cut',feature.pattern);
             validate(next);
             if(Math.abs(measureVolume(next)-before)<EPS)fail('Skizze berührt den Körper nicht oder ändert kein Volumen.');
+          }else if(feature.type==='surfaceTexture'){
+            if(!Array.isArray(feature.targets)||!feature.targets.length||feature.targets.length>8)fail('Eine bis acht Flächen für die Oberflächenstruktur wählen.');
+            const faces=shape.faces;entities.push(...faces);
+            const selected=feature.targets.map(target=>resolve(faces,target.face,target.reference,bb,'face'));
+            if(new Set(selected.map(s=>s.index)).size!==selected.length)fail('Flächen dürfen nicht doppelt ausgewählt sein.');
+            feature.targets=selected.map(s=>({face:s.index,reference:s.reference}));
+            next=shape.clone();
+            for(const selectedFace of selected){const textured=cutSurfaceTexture(next,selectedFace.entity,object(feature.params,'Strukturmaße'),oc,budget);next.delete();next=textured;validate(next);}
+          }else if(feature.type==='grip'){
+            const layout=gripLayout(object(feature.params,'Griffmulden'),bb),cutters=[];
+            try{for(const center of layout.centers)cutters.push(makeCylinder(layout.radius,layout.height,center));prism=makeCompound(cutters);}finally{cutters.forEach(cutter=>cutter.delete());}
+            next=shape.cut(prism);validate(next);
+            if(measureVolume(shape)-measureVolume(next)<EPS)fail('Die Griffmulden berühren den Körper nicht. Umfangsradius prüfen.');
           }else if(feature.type==='shell'){
             const thickness=number(feature.thickness,'Wandstärke',.01),faces=shape.faces;entities.push(...faces);
             if(feature.closed!=null&&typeof feature.closed!=='boolean')fail('Geschlossen muss ein Wahrheitswert sein.');
@@ -380,11 +398,11 @@ export function createKernel(oc){
   async function buildProject(input){
     object(input,'Projekt');if((input.version??1)!==1)fail('Ungültiges Projektformat (Version 1 erwartet).');
     if(!Array.isArray(input.objects)||input.objects.length>30)fail('Maximal 30 Körper pro Projekt möglich.');
-    const project=expandGenerators(input),models=[],ids=new Set(),budget={count:0,sketches:new Map()};project.version=1;
+    const project=assemble(expandGenerators(input)),models=[],ids=new Set(),budget={count:0,sketches:new Map()};project.version=1;
     if(project.sketches!=null&&(!Array.isArray(project.sketches)||project.sketches.length>32))fail('Maximal 32 freie Skizzen pro Projekt.');
     for(const sketch of project.sketches??[]){
       if(typeof sketch?.id!=='string'||!sketch.id||sketch.id.length>80||budget.sketches.has(sketch.id))fail('Skizzen-Kennungen müssen eindeutig sein.');
-      validateEntities(sketch.entities);budget.sketches.set(sketch.id,sketch);
+      const solved=solveSketch(sketch,project.variables??{});Object.assign(sketch,solved.sketch);sketchPlane(sketch.plane);budget.sketches.set(sketch.id,sketch);
     }
     try{
       for(const spec of project.objects){
