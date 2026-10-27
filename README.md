@@ -12,6 +12,8 @@ Die gebaute Anwendung wird als statische Website über HTTPS bereitgestellt. Nut
 
 Der erste Aufruf lädt rund 23 MB WebAssembly (bei gzip etwa 7,3 MB). Aktuelle Desktop-Browser mit WebAssembly, WebGL und Web Workers werden benötigt. Automatisiert geprüft wird Chromium. Maus und Tastatur sind für die CAD-Bedienung vorgesehen.
 
+Neue Versionen werden im geöffneten Tab jede Minute sowie beim Zurückwechseln und Wiederherstellen der Verbindung geprüft. Sobald eine Version vollständig für die Offline-Nutzung geladen ist, erscheint unten ein roter Hinweis **Neue Version verfügbar · Jetzt neu laden**. Ein Klick aktiviert sie und lädt die Seite neu; laufende Bearbeitungen oder noch nicht übernommene Eingaben müssen vorher abgeschlossen werden. Gespeicherte Projekte bleiben erhalten.
+
 ### Lokal entwickeln
 
 Node.js **22.12 oder neuer** installieren und im Projektverzeichnis ausführen:

@@ -1,3 +1,4 @@
+import {setupAppUpdates} from './app-update.js';
 import {releaseChangedMeasures} from './model-parameters.js';
 import {setupEngineeringEditor} from './engineering-editor.js';
 import {poseMatrix} from './model-geometry.js';
@@ -933,16 +934,12 @@ init();
 
 // Offline caching is only enabled for the built application, never in development.
 if(import.meta.env.PROD&&'serviceWorker' in navigator){
- navigator.serviceWorker.register(new URL('./sw.js',window.location.href)).then(async registration=>{
-  const updateButton=$('#update-app');
-  const offerUpdate=()=>{if(registration.waiting)updateButton.hidden=false;};
-  offerUpdate();registration.addEventListener('updatefound',()=>registration.installing?.addEventListener('statechange',offerUpdate));
-  updateButton.onclick=()=>{
-   if(busy||sketch){toast('Bitte die laufende Bearbeitung zuerst beenden.');return;}
-   navigator.serviceWorker.addEventListener('controllerchange',()=>location.reload(),{once:true});
-   registration.waiting?.postMessage('ACTIVATE_UPDATE');
-  };
-  await navigator.serviceWorker.ready;
+ setupAppUpdates({
+  button:$('#update-app'),
+  canReload:()=>sessionReady&&!busy&&!sketch&&!drag&&!transformStart&&!inspectorDirty&&!document.querySelector('#generator-dialog[open],#region-dialog[open],#engineering-dialog[open]'),
+  onBlocked:()=>toast('Bitte die laufende Bearbeitung zuerst übernehmen oder beenden. Deine Eingaben bleiben erhalten.'),
+  onError:()=>toast('Das Update konnte noch nicht aktiviert werden. Bitte erneut versuchen.',true),
+ }).then(()=>{
   const badge=$('.local-badge');if(badge)badge.title='Vollständig geladen · auch offline verfügbar';
  }).catch(()=>{const badge=$('.local-badge');if(badge)badge.title='Offline-Speicherung nicht verfügbar; die Anwendung funktioniert online.';});
 }
