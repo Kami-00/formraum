@@ -34,7 +34,7 @@ export function createBodyPattern(project,ids,options,newId=()=>crypto.randomUUI
  }
  const copies=[];
  for(let index=1;index<count;index++)for(const source of sources){
-  const copy=structuredClone(source);copy.id=newId();copy.name=(source.name||'Körper')+(mode==='mirror'?' gespiegelt':` Kopie ${index}`);
+  const copy=structuredClone(source);delete copy.generated;copy.id=newId();copy.locked=false;copy.name=(source.name||'Körper')+(mode==='mirror'?' gespiegelt':` Kopie ${index}`);
   if(mode==='linear')copy.position=vector(source.position??[0,0,0],'Position').map((n,i)=>number(n+step[i]*index,'Position der Kopie'));
   if(mode==='circular'){
    const radians=angle*Math.PI/180*index/(Math.abs(angle)===360?count:count-1);

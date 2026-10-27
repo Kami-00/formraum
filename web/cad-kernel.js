@@ -1,10 +1,14 @@
+import {findRegions,validateEntities,regionAxis,assertAxisOutside,edgePoint} from './sketch-regions.js';
+import {expandGenerators} from './generators.js';
 import {
   makeBox, makeCylinder, makeSphere, makeFace, draw, drawRectangle, drawCircle, drawEllipse, drawPolysides, cast, Plane, EdgeFinder, FaceFinder,
-  measureVolume, measureArea, measureShapeLinearProperties, measureDistanceBetween,
-  importSTEP, exportSTEP, makeCompound,
+  measureVolume, measureShapeVolumeProperties, measureArea, measureShapeLinearProperties, measureDistanceBetween,
+  importSTEP, exportSTEP, makeCompound, genericSweep,
 } from 'replicad';
 import {positionedCenter} from './sketch-position.js';
 import {gear,thread,convexHull} from './mechanical.js';
+import {validateSweepPath,loftDefaults} from './profile-operations.js';
+import {validateVertices} from './profile-geometry.js';
 import {SHAPES} from './shapes.js';
 
 const EPS=1e-7, MAX_FILE=25*1024*1024;
@@ -144,6 +148,18 @@ function rotatePoint(point,rotation){
 function dispose(shape){shape?._local?.delete();shape?.delete();}
 function profileDrawing(sk){
  const kind=sk.kind;
+ if(kind==='polyline'){
+  if(sk.closed!==true)fail('Den Linienzug zuerst schließen.');
+  const vertices=validateVertices(sk.vertices),pen=draw([vertices[0].x,vertices[0].y]);
+  for(const v of vertices.slice(1))pen.lineTo([v.x,v.y]);
+  return pen.close();
+ }
+ if(kind==='slot'){
+  const w=number(sk.width,'Langlochbreite',.01),h=number(sk.height,'Langlochhöhe',.01),r=Math.min(w,h)/2,d=Math.abs(w-h)/2;
+  if(d<1e-7)return drawCircle(r);
+  const result=draw([-d,-r]).lineTo([d,-r]).threePointsArcTo([d,r],[d+r,0]).lineTo([-d,r]).threePointsArcTo([-d,-r],[-d-r,0]).close();
+  return w>=h?result:result.rotate(90);
+ }
  if(kind==='rectangle')return drawRectangle(number(sk.width??10,'Skizzenbreite',.01),number(sk.height??10,'Skizzenhöhe',.01));
  if(kind==='ellipse')return drawEllipse(number(sk.width??10,'Skizzenbreite',.01)/2,number(sk.height??10,'Skizzenhöhe',.01)/2);
  if(kind==='circle')return drawCircle(number(sk.radius??5,'Skizzenradius',.005));
@@ -189,7 +205,7 @@ export function createKernel(oc){
   async function buildObject(spec,depth=0,keepLocal=false,budget={count:0}){
     if(++budget.count>150)fail('Maximal 150 Ausgangskörper einschließlich Kombinationen möglich.');
     if(depth>8)fail('Maximal acht verschachtelte Kombinationen möglich.');
-    object(spec,'Körper');const params=object(spec.params??{},'Maße');let shape,local;
+    object(spec,'Körper');if(spec.locked!=null&&typeof spec.locked!=='boolean')fail('Körpersperre muss ein Wahrheitswert sein.');if(spec.density!=null&&number(spec.density,'Materialdichte',0)>30)fail('Materialdichte maximal 30 g/cm³.');const params=object(spec.params??{},'Maße');let shape,local;
     const p=key=>number(params[key]??SHAPES[spec.kind]?.params[key],key,key==='topRadius'?0:.005);
     try{
       if(spec.kind==='gear'||spec.kind==='thread'){const values=Object.fromEntries(Object.entries(SHAPES[spec.kind].params).map(([key,value])=>[key,number(params[key]??value,key,key==='bore'?0:.005)]));shape=spec.kind==='gear'?gear(values):thread(values);}
@@ -221,12 +237,54 @@ export function createKernel(oc){
           try{first=c.fuse(a);shape=first.fuse(b);}finally{first?.delete();a.delete();b.delete();c.delete();}
         }
       }
+      else if(spec.kind==='region'){
+        const source=budget.sketches?.get(spec.sketchId);if(!source)fail('Die freie Quellskizze fehlt.');
+        if(!Array.isArray(spec.regions)||!spec.regions.length||spec.regions.length>32||new Set(spec.regions).size!==spec.regions.length)fail('1 bis 32 unterschiedliche Flächen zum Rotieren auswählen.');
+        const regions=findRegions(source.entities),axis=regionAxis(spec,source.entities),angle=number(params.revolveAngle??360,'Rotationswinkel',.01);
+        if(angle>360)fail('Rotationswinkel höchstens 360°.');
+        const direction=[axis.direction[0],0,axis.direction[1]],origin=[axis.origin[0],0,axis.origin[1]];
+        const loopSolid=loop=>{
+          const pen=draw(loop[0].a);
+          for(const edge of loop)if(edge.kind==='line')pen.lineTo(edge.b);else pen.threePointsArcTo(edge.b,edgePoint(edge,.5));
+          return pen.close().sketchOnPlane('XZ').revolve(direction,{origin,angle});
+        };
+        for(const id of spec.regions){
+          const region=regions.find(r=>r.id===id);if(!region)fail('Eine ausgewählte Skizzenfläche hat sich geändert. Freie Skizze öffnen und die Flächen erneut auswählen.');
+          assertAxisOutside(region,axis);let solid;
+          try{
+            solid=loopSolid(region.outer);
+            for(const hole of region.holes){const cut=loopSolid(hole);try{const next=solid.cut(cut);solid.delete();solid=next;}finally{cut.delete();}}
+            const next=shape?shape.fuse(solid):solid.clone();shape?.delete();shape=next;
+          }finally{solid?.delete();}
+        }
+      }
       else if(spec.kind==='profile'){
         const plane=spec.plane??'XY';if(!['XY','XZ','YZ'].includes(plane))fail('Unbekannte Skizzenebene.');
         const multiple=spec.contours!=null;if(multiple&&!Array.isArray(spec.contours))fail('Konturliste erwartet.');
         shape=sketchTool([object(spec.profile,'Skizze'),...(spec.contours??[])],profile=>{
           const center=multiple?vector(profile.center??[0,0],'Konturmittelpunkt',2):[0,0];
-          return profileDrawing(profile).rotate(number(profile.angle??0,'Skizzenwinkel')).translate(center).sketchOnPlane(plane).extrude(number(params.height??10,'Höhe',.01));
+          const drawing=profileDrawing(profile).rotate(number(profile.angle??0,'Skizzenwinkel')).translate(center);
+          const operation=spec.operation??'extrude';
+          if(operation==='extrude')return drawing.sketchOnPlane(plane).extrude(number(params.height??10,'Höhe',.01));
+          if(operation==='loft'){
+            const height=number(params.height??10,'Loft-Höhe',.01),endScale=number(params.topScale??loftDefaults.topScale,'Endmaß-Faktor',.01),angle=number(params.topAngle??0,'Endwinkel'),offset=[number(params.topU??0,'Endversatz U'),number(params.topV??0,'Endversatz V')];
+            if(endScale>100)fail('Endmaß-Faktor maximal 100.');
+            const first=drawing.sketchOnPlane(plane),last=drawing.clone().scale(endScale,[0,0]).rotate(angle).translate(offset).sketchOnPlane(plane,height);
+            try{return first.loftWith(last,{ruled:true});}finally{first.delete();last.delete();}
+          }
+          if(operation==='sweep'){
+            if(plane!=='XY')fail('Sweep benötigt eine XY-Skizze.');
+            const points=validateSweepPath(spec.sweepPath),pen=draw([0,0]);
+            for(const p of points.slice(1))pen.lineTo([p.x,p.y]);
+            const path=pen.done().sketchOnPlane('XZ'),section=drawing.sketchOnPlane('XY'),pathWire=path.wires(),sectionWire=section.wires();
+            try{return genericSweep(sectionWire,pathWire,{transitionMode:'right'});}
+            finally{pathWire.delete();sectionWire.delete();path.delete();section.delete();}
+          }
+          if(operation!=='revolve')fail('Unbekannte Skizzenoperation.');
+          const angle=number(params.revolveAngle??360,'Rotationswinkel',.01),offset=number(params.axisOffset??0,'Achsenposition');
+          if(angle>360)fail('Der Rotationswinkel darf höchstens 360° betragen.');
+          const axis={XY:[0,1,0],XZ:[0,0,1],YZ:[0,0,1]}[plane],origin={XY:[offset,0,0],XZ:[offset,0,0],YZ:[0,offset,0]}[plane];
+          return drawing.sketchOnPlane(plane).revolve(axis,{origin,angle});
         });
       }
       else if(spec.kind==='boolean'){
@@ -254,7 +312,12 @@ export function createKernel(oc){
       const features=spec.features??[];
       if(!Array.isArray(features)||features.length>50)fail('Maximal 50 Bearbeitungen pro Körper möglich.');
       spec.features=features;
+      if(spec.rollback!=null&&(!Number.isInteger(spec.rollback)||spec.rollback<0||spec.rollback>features.length))fail('Ungültige Position im Modellverlauf.');
       for(const [i,feature] of features.entries()){
+        object(feature,'Bearbeitung');
+        if(feature.suppressed!=null&&typeof feature.suppressed!=='boolean')fail('Unterdrücken muss ein Wahrheitswert sein.');
+        if(i>=(spec.rollback??features.length))break;
+        if(feature.suppressed)continue;
         let next,prism;const entities=[];
         try{
           object(feature,'Bearbeitung');const bb=bounds(shape);
@@ -317,7 +380,12 @@ export function createKernel(oc){
   async function buildProject(input){
     object(input,'Projekt');if((input.version??1)!==1)fail('Ungültiges Projektformat (Version 1 erwartet).');
     if(!Array.isArray(input.objects)||input.objects.length>30)fail('Maximal 30 Körper pro Projekt möglich.');
-    const project=structuredClone(input),models=[],ids=new Set(),budget={count:0};project.version=1;
+    const project=expandGenerators(input),models=[],ids=new Set(),budget={count:0,sketches:new Map()};project.version=1;
+    if(project.sketches!=null&&(!Array.isArray(project.sketches)||project.sketches.length>32))fail('Maximal 32 freie Skizzen pro Projekt.');
+    for(const sketch of project.sketches??[]){
+      if(typeof sketch?.id!=='string'||!sketch.id||sketch.id.length>80||budget.sketches.has(sketch.id))fail('Skizzen-Kennungen müssen eindeutig sein.');
+      validateEntities(sketch.entities);budget.sketches.set(sketch.id,sketch);
+    }
     try{
       for(const spec of project.objects){
         if(typeof spec?.id!=='string'||!spec.id||spec.id.length>128||ids.has(spec.id))fail('Körper-Kennungen müssen gültig und eindeutig sein.');
@@ -346,7 +414,8 @@ export function createKernel(oc){
         for(let j=0;j<lines.length;j+=6){if(j===0)points.push(lines.slice(j,j+3));points.push(lines.slice(j+3,j+6));}
         return {id:i+1,points,length:edge.length,reference:reference(localEdges[i],localBB,'edge')};
       });
-      return {id:spec.id,name:String(spec.name??spec.id).slice(0,200),mesh,faces:faceData,edges:edgeData,bounds:bb,volume:measureVolume(shape),valid:true};
+      const physical=measureShapeVolumeProperties(shape);let centerOfMass;try{centerOfMass=physical.centerOfMass;}finally{physical.delete();}
+      return {centerOfMass,id:spec.id,name:String(spec.name??spec.id).slice(0,200),mesh,faces:faceData,edges:edgeData,bounds:bb,volume:measureVolume(shape),valid:true};
     }finally{faces.forEach(f=>f.delete());edges.forEach(e=>e.delete());localFaces.forEach(f=>f.delete());localEdges.forEach(e=>e.delete());}
   }
   async function modelResponse(input){
@@ -357,6 +426,23 @@ export function createKernel(oc){
   return async(operation,payload)=>{
     if(operation==='ready')return {ok:true};
     if(operation==='model')return modelResponse(payload.project);
+    if(operation==='section'){
+      const index=['x','y','z'].indexOf(payload.axis),offset=number(payload.offset,'Schnittposition');
+      if(index<0||typeof payload.flip!=='boolean')fail('Ungültige Schnittebene.');
+      const {models}=await buildProject(payload.project),objects=[];
+      try{
+        for(const {spec,shape} of models){
+          if(spec.visible===false)continue;
+          const bb=bounds(shape),min=bb.min.map(v=>v-1),max=bb.max.map(v=>v+1);
+          if(payload.flip)min[index]=Math.max(min[index],offset);else max[index]=Math.min(max[index],offset);
+          if(max[index]-min[index]<EPS)continue;
+          const cutter=makeBox(min,max);let cut;
+          try{cut=shape.intersect(cutter);if(measureVolume(cut)>EPS)objects.push(shapeJSON({id:spec.id,name:spec.name},cut));}
+          finally{cut?.delete();cutter.delete();}
+        }
+        return {objects};
+      }finally{models.forEach(m=>dispose(m.shape));}
+    }
     if(operation==='measure'){
       if(typeof payload.first!=='string'||typeof payload.second!=='string'||payload.first===payload.second)fail('Zwei unterschiedliche Körper zum Messen wählen.');
       const {models}=await buildProject(payload.project);
@@ -365,7 +451,8 @@ export function createKernel(oc){
         if(!first||!second)fail('Ein Messkörper fehlt im Projekt.');
         const distance=measureDistanceBetween(first.shape,second.shape);
         if(!Number.isFinite(distance)||distance<0)fail('Abstand konnte nicht berechnet werden.');
-        return {distance,unit:'mm'};
+        const overlap=first.shape.intersect(second.shape);let intersectionVolume;try{intersectionVolume=Math.max(0,measureVolume(overlap));}finally{overlap.delete();}
+        return {distance,intersectionVolume,unit:'mm'};
       }finally{models.forEach(m=>dispose(m.shape));}
     }
     if(operation==='import_step'){

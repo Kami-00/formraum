@@ -26,6 +26,17 @@ test('real MCP stdio client pairs, models, protects revisions, undoes and discon
   const created=await call(client,'formraum_create_project',{projectId:undone.projectId,revision:undone.revision,name:'KI Projekt'});expect(created.projectId).not.toBe(first.projectId);
   expect((await call(client,'formraum_list_projects')).projects).toHaveLength(2);
   const opened=await call(client,'formraum_open_project',{projectId:created.projectId,revision:created.revision,targetId:first.projectId});expect(opened.projectId).toBe(first.projectId);
+  const parametric=structuredClone(opened.project);parametric.variables={width:7,count:2};
+  parametric.generators=[{id:'mcp-generator',name:'MCP Muster',nodes:[{id:'body',name:'Block',body:{kind:'box',params:{width:1,depth:5,height:5},expressions:{width:'width'},features:[]},pattern:{mode:'linear',count:'count',step:[50,0,0]}}]}];
+  await page.locator('#open-generator').click();
+  expect((await call(client,'formraum_apply_project',{projectId:opened.projectId,revision:opened.revision,project:parametric})).response.isError).toBe(true);
+  await page.locator('[data-gen-action="close"]').click();
+  const generated=await call(client,'formraum_apply_project',{projectId:opened.projectId,revision:opened.revision,project:parametric});
+  expect(generated.response.isError).not.toBe(true);expect(generated.project.variables).toEqual(parametric.variables);expect(generated.project.generators).toEqual(parametric.generators);expect(generated.geometry).toHaveLength(3);expect(generated.geometry[1].volume).toBeCloseTo(175,4);
+  const withSketch=structuredClone(generated.project);withSketch.sketches=[{id:'source',name:'Freie Skizze',entities:[{id:'circle',kind:'circle',center:[15,0],radius:3}]}];
+  const {findRegions}=await import('../web/sketch-regions.js');withSketch.objects.push({id:'rotation',kind:'region',sketchId:'source',regions:findRegions(withSketch.sketches[0].entities).map(r=>r.id),params:{revolveAngle:360,axisOffset:0},features:[]});
+  const free=await call(client,'formraum_apply_project',{projectId:generated.projectId,revision:generated.revision,project:withSketch});expect(free.response.isError).not.toBe(true);expect(free.project.sketches).toEqual(withSketch.sketches);expect(free.geometry.find(o=>o.id==='rotation').volume).toBeCloseTo(2*Math.PI**2*15*9,4);
+  await page.locator('#region-sketch-list button').click();expect((await call(client,'formraum_apply_project',{projectId:free.projectId,revision:free.revision,project:withSketch})).response.isError).toBe(true);await page.locator('[data-rs-action="close"]').click();
   await page.locator('#session-button').click();await page.locator('#session-disconnect').click();await expect(page.locator('#session-status')).toHaveText('Nicht verbunden');
   await expect.poll(async()=>(await call(client,'formraum_connection')).connected).toBe(false);
   expect((await call(client,'formraum_get_project')).response.isError).toBe(true);
