@@ -1,3 +1,4 @@
+import {profilePoints} from './profile-geometry.js';
 // Exact axis-aligned extents of the rotated profile, relative to its center.
 export function profileExtents(s){
  const a=(s.angle??0)*Math.PI/180,c=Math.cos(a),t=Math.sin(a);
@@ -6,7 +7,14 @@ export function profileExtents(s){
   const x=Math.hypot(s.width/2*c,s.height/2*t),y=Math.hypot(s.width/2*t,s.height/2*c);
   return {min:[-x,-y],max:[x,y]};
  }
+ if(s.kind==='slot'){
+  const r=Math.min(s.width,s.height)/2,d=Math.abs(s.width-s.height)/2;
+  const x=r+d*Math.abs(s.width>=s.height?c:t),y=r+d*Math.abs(s.width>=s.height?t:c);
+  return {min:[-x,-y],max:[x,y]};
+ }
  let points;
+ if(s.kind==='polyline'){points=profilePoints(s);if(!points.length)points=[[0,0]];}
+ else
  if(s.kind==='rectangle')points=[[-s.width/2,-s.height/2],[s.width/2,-s.height/2],[s.width/2,s.height/2],[-s.width/2,s.height/2]];
  else if(s.kind==='polygon'&&Number.isInteger(s.sides)&&s.sides>=3&&s.sides<=64)points=Array.from({length:s.sides},(_,i)=>{const a=Math.PI/2+2*Math.PI*i/s.sides;return [Math.cos(a)*s.radius,Math.sin(a)*s.radius];});
  else throw new Error('Unbekannte oder ungültige Skizzenkontur.');

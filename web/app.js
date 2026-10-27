@@ -1,3 +1,11 @@
+import {setupRegionEditor} from './region-editor.js';
+import {setupGeneratorEditor} from './generator-editor.js';
+import {evaluateExpression,resolveVariables} from './expressions.js';
+import {transformedBodies} from './body-transform.js';
+import {TransformControls} from './vendor/TransformControls.js';
+import {defaultSweepPath,loftDefaults,validateSweepPath} from './profile-operations.js';
+import {assertUnlockedChanges,pasteBodies,referencedSketches} from './body-editing.js';
+import {profilePoints,validateVertices} from './profile-geometry.js';
 import {suggestPoint,suggestSize} from './sketch-suggestions.js';
 import {draggedProfileBounds} from './sketch-drag.js';
 import {profileExtents,positionedCenter} from './sketch-position.js';
@@ -7,6 +15,7 @@ import {SketchDraftStore,validateDraft,sameReference} from './sketch-drafts.js';
 import {setupSession} from './session.js';
 import {calculate} from './cad-client.js';
 import {createPreviewClient} from './preview-client.js';
+import {createBodyPattern} from './body-patterns.js';
 import * as THREE from './vendor/three.module.js';
 import {OrbitControls} from './vendor/OrbitControls.js';
 
@@ -28,8 +37,13 @@ let tool='select', sketch=null, busy=false, undoStack=[], redoStack=[], hoverEdg
 let savedCamera=null, lastPointer=null, selectedContour=0;
 let selectedBodies=new Set([selectedId]);
 let sketchPreview=null;
+let patternMode='linear',measurementResult=null,sectionActive=false;
+const sectionSettings={axis:'x',offset:0,flip:false};
+const marquee=document.createElement('div');marquee.className='selection-marquee';marquee.hidden=true;
+const moveSettings={plane:'xy',axis:'free',snap:1};
 
 const viewport=$('#viewport');
+viewport.appendChild(marquee);
 const scene=new THREE.Scene();scene.background=new THREE.Color('#f0f4f6');
 const camera=new THREE.OrthographicCamera(-60,60,60,-60,.1,3000);camera.up.set(0,0,1);
 camera.position.set(110,-140,115);camera.lookAt(0,0,8);
@@ -51,6 +65,29 @@ for(const [dir,color] of [[[35,0,0],0xc98076],[[0,35,0],0x83a17c],[[0,0,25],0x78
 const bodyRoot=new THREE.Group(), overlayRoot=new THREE.Group(), sketchRoot=new THREE.Group();scene.add(bodyRoot,overlayRoot,sketchRoot);
 const previewRoot=new THREE.Group();scene.add(previewRoot);
 let bodyMeshes=[], edgeLines=[], groups=new Map(), viewHeight=90;
+const transformProxy=new THREE.Object3D();scene.add(transformProxy);
+const transformControl=new TransformControls(camera,renderer.domElement);transformControl.setSize(.9);transformControl.setSpace('world');scene.add(transformControl.getHelper());
+let transformStart=null;
+transformControl.addEventListener('mouseDown',()=>{
+ if(busy||!['rotate','scale'].includes(tool))return;
+ transformStart={ids:[...selectedBodies],center:transformProxy.position.toArray()};controls.enabled=false;selectedFace=null;renderSelection();
+});
+transformControl.addEventListener('objectChange',()=>{
+ if(!transformStart)return;
+ if(tool==='scale'){
+  const axis=transformControl.axis??'XYZ',value=axis.includes('X')?transformProxy.scale.x:axis.includes('Y')?transformProxy.scale.y:transformProxy.scale.z;
+  transformProxy.scale.setScalar(Math.max(.001,value));
+ }
+ const pivot=vec(transformStart.center),matrix=new THREE.Matrix4().compose(pivot,transformProxy.quaternion,transformProxy.scale).multiply(new THREE.Matrix4().makeTranslation(-pivot.x,-pivot.y,-pivot.z));
+ for(const id of transformStart.ids){const group=groups.get(id);if(group){group.matrixAutoUpdate=false;group.matrix.copy(matrix);}}
+ const label=$('#transform-delta');if(label)label.textContent=tool==='scale'?`Faktor ${fmt(transformProxy.scale.x,3)}`:`Drehung ${fmt(THREE.MathUtils.radToDeg(transformProxy.quaternion.angleTo(new THREE.Quaternion())),1)}°`;
+});
+transformControl.addEventListener('mouseUp',async()=>{
+ controls.enabled=true;if(!transformStart)return;const start=transformStart,q=transformProxy.quaternion.toArray(),scale=transformProxy.scale.x;transformStart=null;
+ if(Math.abs(scale-1)<1e-8&&transformProxy.quaternion.angleTo(new THREE.Quaternion())<1e-8){resetTransformGroups();syncTransformHandle();return;}
+ try{const next=transformedBodies(project,start.ids,start.center,q,scale);if(await commit(next,{message:tool==='scale'?'Auswahl skaliert':'Auswahl gedreht'})){selectedBodies=new Set(start.ids);renderBodies();renderPanels();}else resetTransformGroups();}
+ catch(error){resetTransformGroups();toast(error.message,true);}finally{syncTransformHandle();}
+});
 const raycaster=new THREE.Raycaster(), pointer=new THREE.Vector2();
 const dimensionLayer=document.createElement('div');dimensionLayer.className='dimension-layer';viewport.appendChild(dimensionLayer);
 const dimensionInputs=new Map();
@@ -85,7 +122,7 @@ function renderBodies(){
    line.userData={body:model.id,edge:edge.id};group.add(line);edgeLines.push(line);
   }
  }
- renderSelection();
+ renderSelection();syncTransformHandle();
 }
 function renderSelection(){
  disposeGroup(overlayRoot);
@@ -134,7 +171,7 @@ function selectObject(id,face=null,additive=false){
 function currentSpec(){return project.objects.find(o=>o.id===selectedId);}
 function currentModel(){return models.find(o=>o.id===selectedId);}
 function toast(message,error=false){clearTimeout(toastTimer);const t=$('#toast');t.textContent=message;t.classList.toggle('error',error);t.hidden=false;toastTimer=setTimeout(()=>t.hidden=true,error?8500:3500);}
-function setBusy(value){busy=value;document.body.classList.toggle('busy',value);$('#busy-badge').hidden=!value;updateUndo();if(sketch)syncSketchInputs();}
+function setBusy(value){busy=value;transformControl.enabled=!value;if(!value)syncTransformHandle();document.body.classList.toggle('busy',value);$('#busy-badge').hidden=!value;updateUndo();if(sketch)syncSketchInputs();}
 function setStatus(message,ok=true){$('#status').textContent=message;$('#connection-dot').classList.toggle('off',!ok);}
 function updateUndo(){$('#undo').disabled=busy||!undoStack.length;$('#redo').disabled=busy||!redoStack.length;}
 async function commit(next,{record=true,fit=false,message='',entry=null,create=false,fromSketch=false}={}){
@@ -142,12 +179,14 @@ async function commit(next,{record=true,fit=false,message='',entry=null,create=f
  if(sketch&&!fromSketch){lastCommitError='Bitte die Skizze zuerst aufbauen, ausschneiden oder beenden.';toast(lastCommitError,true);return false;}
  setBusy(true);const n=++requestVersion;lastCommitError='';
  try{
+  if(record&&!entry&&!create)assertUnlockedChanges(project,next);
   const result=await calculate('model',{project:next});if(n!==requestVersion)return false;
+  if(record&&!entry&&!create)assertUnlockedChanges(project,result.project,{resolved:true});
   const saved=entry||await library.save(create?uid():activeProjectId,result.project,create?0:projectRevision);
   if(entry||create){undoStack=[];redoStack=[];}
   else if(record){undoStack.push(clone(project));if(undoStack.length>60)undoStack.shift();redoStack=[];}
   activeProjectId=saved.id;projectRevision=saved.revision;library.activate(saved.id);
-  project=clone(result.project);models=result.objects;
+  project=clone(result.project);models=result.objects;clearSection();
   if(!project.objects.some(o=>o.id===selectedId))selectedId=project.objects[0]?.id||null;
   selectedFace=null;selectedEdges.clear();hoverEdge=null;selectedFeature=-1;selectedContour=0;selectedBodies=new Set(selectedId?[selectedId]:[]);
   inspectorDirty=false;renderBodies();renderPanels();renderProjectList();$('#autosave-status').textContent='Projekt im Browser gespeichert';
@@ -184,16 +223,17 @@ window.addEventListener('storage',event=>{
 });
 
 function field(label,key,value,unit='mm',extra=''){
- return `<label class="field"><span>${esc(label)}</span><div class="input-unit"><input type="number" data-field="${esc(key)}" value="${Number(value??0)}" step="0.1" ${extra} aria-label="${esc(label)}">${unit?`<em>${esc(unit)}</em>`:''}</div></label>`;
+ return `<label class="field"><span>${esc(label)}</span><div class="input-unit"><input type="number" data-field="${esc(key)}" value="${Number(value??0)}" ${extra.includes('step=')?'':'step="0.1"'} ${extra} aria-label="${esc(label)}">${unit?`<em>${esc(unit)}</em>`:''}</div></label>`;
 }
 function featureName(f){return ({extrude:'Aufbauen',pocket:'Ausschneiden',fillet:'Rundung',chamfer:'Fase',shell:'Wandung'})[f.type]||f.type;}
 function featureIcon(f){return ({extrude:'extrude',pocket:'cut',fillet:'fillet',chamfer:'chamfer'})[f.type]||'sketch';}
 function featureDetail(f){const scale=currentSpec()?.scale??1;return f.type==='shell'?`${fmt(f.thickness*scale)} mm Wand`:f.type==='fillet'?`R ${fmt(f.radius*scale)}`:f.type==='chamfer'?`${fmt(f.distance*scale)} mm`:`${fmt(f.depth*scale)} mm`;}
 function renderPanels(){
+ $('#region-sketch-list').innerHTML=(project.sketches??[]).map(s=>`<button class="subtle-button" data-open-region-sketch="${esc(s.id)}">✎ ${esc(s.name||'Freie Skizze')}</button>`).join('');
  $('#project-name').value=project.name||'Unbenanntes Bauteil';$('#body-count').textContent=project.objects.length;
- $('#body-list').innerHTML=project.objects.length?project.objects.map(o=>`<div class="body-row ${selectedBodies.has(o.id)?'active':''} ${o.visible===false?'invisible':''}" data-body="${esc(o.id)}" role="button" tabindex="0" aria-label="${esc(o.name)}" title="${esc(o.name)}"><input type="checkbox" data-multi-body="${esc(o.id)}" aria-label="${esc(o.name)} zur Auswahl hinzufügen" ${selectedBodies.has(o.id)?'checked':''}><span class="body-icon">${icon(o.kind==='cylinder'?'cylinder':'box')}</span><span class="body-label">${esc(o.name)}${o.hole?' · Bohrung':''}</span><button class="icon-button" data-visibility="${esc(o.id)}" title="Sichtbarkeit" aria-label="${o.visible===false?'Einblenden':'Ausblenden'}">${icon('eye')}</button></div>`).join(''):'<p class="tip" style="padding:5px 9px">Füge eine Form hinzu oder beginne mit einer Skizze.</p>';
+ $('#body-list').innerHTML=project.objects.length?project.objects.map(o=>`<div class="body-row ${selectedBodies.has(o.id)?'active':''} ${o.visible===false?'invisible':''}" data-body="${esc(o.id)}" role="button" tabindex="0" aria-label="${esc(o.name)}" title="${esc(o.name)}"><input type="checkbox" data-multi-body="${esc(o.id)}" aria-label="${esc(o.name)} zur Auswahl hinzufügen" ${selectedBodies.has(o.id)?'checked':''}><span class="body-icon">${icon(o.kind==='cylinder'?'cylinder':'box')}</span><span class="body-label">${esc(o.name)}${o.hole?' · Bohrung':''}${o.generated?' · Generator':o.locked?' · gesperrt':''}</span><button class="icon-button" data-lock-body="${esc(o.id)}" aria-label="${o.locked?'Entsperren':'Sperren'}" title="${o.locked?'Entsperren':'Sperren'}">${o.locked?'🔒':'○'}</button><button class="icon-button" data-visibility="${esc(o.id)}" title="Sichtbarkeit" aria-label="${o.visible===false?'Einblenden':'Ausblenden'}">${icon('eye')}</button></div>`).join(''):'<p class="tip" style="padding:5px 9px">Füge eine Form hinzu oder beginne mit einer Skizze.</p>';
  const spec=currentSpec();
- $('#feature-list').innerHTML=spec?`<div class="feature-row ${selectedFeature===-1?'current':''}" data-feature="-1" role="button" tabindex="0" aria-label="Grundkörper" title="Grundkörper">${icon(spec.kind==='cylinder'?'cylinder':'box')}<span>${spec.kind==='imported'?'STEP-Import':'Grundkörper'}</span></div>`+(spec.features||[]).map((f,i)=>`<div class="feature-row ${i===selectedFeature?'current':''}" data-feature="${i}" role="button" tabindex="0" aria-label="${esc(featureName(f)+' '+featureDetail(f))}" title="${esc(featureName(f)+' '+featureDetail(f))}">${icon(featureIcon(f))}<span>${featureName(f)} <small>${esc(featureDetail(f))}</small></span><button class="remove-feature" data-remove-feature="${i}" title="Diesen und folgende Schritte entfernen" aria-label="Diesen und folgende Schritte entfernen">×</button></div>`).join(''):'';
+ $('#feature-list').innerHTML=spec?`<div class="feature-row ${selectedFeature===-1?'current':''}" data-feature="-1" role="button" tabindex="0" aria-label="Grundkörper" title="Grundkörper">${icon(spec.kind==='cylinder'?'cylinder':'box')}<span>${spec.kind==='imported'?'STEP-Import':'Grundkörper'}</span></div>`+(spec.features||[]).map((f,i)=>`<div class="feature-row ${i===selectedFeature?'current':''}" data-feature="${i}" role="button" tabindex="0" aria-label="${esc(featureName(f)+' '+featureDetail(f))}" title="${esc(featureName(f)+' '+featureDetail(f))}">${icon(featureIcon(f))}<span>${featureName(f)}${f.suppressed?' · unterdrückt':''}${i>=(spec.rollback??Infinity)?' · später':''} <small>${esc(featureDetail(f))}</small></span><button class="remove-feature" data-remove-feature="${i}" title="Diesen und folgende Schritte entfernen" aria-label="Diesen und folgende Schritte entfernen">×</button></div>`).join(''):'';
  renderInspector();
  const faceText=selectedFace?` · Fläche ${selectedFace.id}`:'';
  $('#selection-status').textContent=selectedBodies.size>1?`${selectedBodies.size} Körper ausgewählt · Basis: ${spec?.name||''}`:spec?`${spec.name}${faceText}`:'Keine Auswahl';
@@ -203,40 +243,67 @@ function renderInspector(){
  inspectorDirty=false;
  const root=$('#inspector'),spec=currentSpec(),model=currentModel();
  if(sketch){renderSketchInspector();return;}
+ if(tool==='pattern'){renderPatternInspector();return;}
+ if(tool==='measure'){renderMeasureInspector();return;}
+ if(tool==='section'){renderSectionInspector();return;}
+ if(tool==='move'){renderMoveInspector();return;}
+ if(tool==='rotate'||tool==='scale'){renderTransformInspector();return;}
  if(selectedBodies.size>1){renderMultiInspector();return;}
  if(tool==='fillet'||tool==='chamfer'){
   const rounded=tool==='fillet';
   root.innerHTML=`<div class="inspector-heading">${rounded?'KANTEN ABRUNDEN':'KANTEN ANFASEN'}${icon(rounded?'fillet':'chamfer')}</div><div class="inspector-content"><p class="tool-description">Klicke die gewünschten Kanten direkt am Bauteil an.</p><div class="edge-count"><strong>${selectedEdges.size}</strong> ${selectedEdges.size===1?'Kante ausgewählt':'Kanten ausgewählt'}</div><div class="chip-list">${[...selectedEdges].map(e=>`<button data-remove-edge="${e}">Kante ${e} ×</button>`).join('')}</div>${field(rounded?'Radius':'Fasenmaß','edge-size',edgeSize)}<button class="primary" data-action="apply-edge" ${!selectedEdges.size||!spec?'disabled':''}>${icon('check')}${rounded?'Rundung':'Fase'} anwenden</button><button class="subtle-button" data-action="cancel-tool">Abbrechen</button><p class="tip">Noch einmal auf eine ausgewählte Kante klicken, um sie abzuwählen. Bei zu großen Maßen bleibt dein Bauteil unverändert.</p></div>`;
   return;
  }
- if(!spec||!model){root.innerHTML=`<div class="inspector-heading">EIGENSCHAFTEN</div><div class="inspector-empty">${icon('select')}<strong>Dein Bauteil im Blick.</strong><p>Wähle einen Körper oder eine Fläche im 3D-Bereich aus.</p></div>`;return;}
+ if(!spec||!model){root.innerHTML=`<div class="inspector-heading">EIGENSCHAFTEN</div><div class="inspector-empty">${icon('select')}<strong>Dein Bauteil im Blick.</strong><p>Wähle einen Körper oder eine Fläche im 3D-Bereich aus.</p><button class="subtle-button" data-action="paste-bodies">Körper einfügen · Strg V</button></div>`;return;}
+ if(spec.generated){root.innerHTML=`<div class="inspector-heading">GENERATORKÖRPER</div><div class="inspector-content"><h3>${esc(spec.name)}</h3><p class="muted">Dieser Körper folgt seinem Generator. Maße, Drehung, Muster und Children dort ändern.</p><button class="primary" data-open-generator="${esc(spec.generated.generatorId)}">Generator bearbeiten</button><button class="subtle-button" data-action="duplicate-body">Als freien Körper duplizieren</button><p class="tip">Im Generator kannst du die gesamte Gruppe in freie Körper umwandeln, um anschließend Flächen und Kanten einzeln zu bearbeiten.</p></div>`;return;}
  if(selectedFeature>=0&&spec.features?.[selectedFeature]){renderFeatureInspector(spec.features[selectedFeature]);return;}
  const bounds=vec(model.bounds.max).sub(vec(model.bounds.min));
  const faceCard=selectedFace?`<div class="face-card"><div class="face-title">${icon('sketch')}Fläche ${selectedFace.id} ausgewählt</div><p>${selectedFace.planar?'Ebene Fläche · '+fmt(selectedFace.area)+' mm²':'Gekrümmte Fläche · '+fmt(selectedFace.area)+' mm²'}</p><button class="primary" data-action="start-sketch" ${selectedFace.planar?'':'disabled'}>${icon('sketch')}Skizze auf Fläche</button>${field('Wandstärke','shell-thickness',2)}<label class="locked-dimension"><input type="checkbox" id="shell-closed"> Geschlossen aushöhlen</label><button class="subtle-button" data-action="apply-shell">Wandung anwenden</button><p class="tip">Wandung nach innen. Die ausgewählte Fläche wird zur Öffnung, außer bei geschlossenem Aushöhlen.</p>${!selectedFace.planar?'<p>Wähle zum Zeichnen eine ebene Fläche.</p>':''}</div>`:'';
- root.innerHTML=`<div class="inspector-heading">EIGENSCHAFTEN<button class="icon-button" data-action="delete-body" title="Körper löschen" aria-label="Körper löschen">${icon('trash')}</button></div><div class="inspector-content"><div class="object-type">${icon(spec.kind==='cylinder'?'cylinder':'box')}${esc(shapeName(spec.kind))}</div><input class="name-field" data-field="body-name" aria-label="Körpername" value="${esc(spec.name)}">${faceCard}<div class="section-title">AUSSENMASSE<span>mm</span></div><div class="bounds-display">${fmt(bounds.x)} <i>×</i> ${fmt(bounds.y)} <i>×</i> ${fmt(bounds.z)}</div>${bodyParameterFields(spec)}${['gear','thread'].includes(spec.kind)?'<p class="tip">'+(spec.kind==='gear'?'Geradverzahnung mit angenäherter Evolvente, 20° Druckwinkel; kein Normprofil.':'Echtes Rechtsgewinde mit vereinfachtem Profil; kein normgeprüftes ISO-Gewinde. Als Bohrung gruppiert entsteht ein Innengewinde.')+'</p>':''}<div class="body-role"><button data-body-role="solid" class="${!spec.hole?'active':''}">Körper</button><button data-body-role="hole" class="${spec.hole?'active':''}">Bohrung</button></div><div class="section-title">POSITION</div><div class="fields-3">${field('X','position-x',spec.position?.[0]||0)}${field('Y','position-y',spec.position?.[1]||0)}${field('Z','position-z',spec.position?.[2]||0)}</div><div class="section-title">DREHUNG<span>° · X → Y → Z</span></div><div class="fields-3">${field('X','rotation-x',spec.rotation?.[0]||0,'°')}${field('Y','rotation-y',spec.rotation?.[1]||0,'°')}${field('Z','rotation-z',spec.rotation?.[2]||0,'°')}</div>${field('Skalierung · gleichmäßig','scale',spec.scale??1,'×')}<button class="primary" data-action="apply-dimensions">${icon('check')}Maße übernehmen</button><div class="body-actions"><button class="subtle-button" data-action="duplicate-body">Duplizieren</button><button class="subtle-button" data-action="ground-body">Auf Boden</button></div>${spec.kind==='boolean'?`<button class="subtle-button" data-action="ungroup" ${spec.features?.length?'disabled':''}>Kombination auflösen</button><p class="tip">Ausgangsformen bleiben bearbeitbar. Auflösen ist vor zusätzlichen Modellschritten möglich.</p>`:''}<div class="volume"><span>Volumen</span><span>${fmt(model.volume)} mm³</span></div>${!selectedFace?'<hr class="divider"><p class="muted">Klicke auf eine Fläche, um dort eine Skizze anzulegen.</p>':''}</div>`;
+ root.innerHTML=`<div class="inspector-heading">EIGENSCHAFTEN<button class="icon-button" data-action="delete-body" title="Körper löschen" aria-label="Körper löschen">${icon('trash')}</button></div><div class="inspector-content"><div class="object-type">${icon(spec.kind==='cylinder'?'cylinder':'box')}${esc(shapeName(spec.kind))}</div><input class="name-field" data-field="body-name" aria-label="Körpername" value="${esc(spec.name)}">${faceCard}<div class="section-title">AUSSENMASSE<span>mm</span></div><div class="bounds-display">${fmt(bounds.x)} <i>×</i> ${fmt(bounds.y)} <i>×</i> ${fmt(bounds.z)}</div>${spec.locked?'<p class="tip">Körper gesperrt. Zum Bearbeiten zuerst links entsperren.</p>':''}${bodyParameterFields(spec)}${spec.rollback!=null?`<p class="tip">Modellverlauf bei Schritt ${spec.rollback} angehalten.</p><button class="subtle-button" data-action="resume-history">Alle Schritte wiederherstellen</button>`:''}${['gear','thread'].includes(spec.kind)?'<p class="tip">'+(spec.kind==='gear'?'Geradverzahnung mit angenäherter Evolvente, 20° Druckwinkel; kein Normprofil.':'Echtes Rechtsgewinde mit vereinfachtem Profil; kein normgeprüftes ISO-Gewinde. Als Bohrung gruppiert entsteht ein Innengewinde.')+'</p>':''}<div class="body-role"><button data-body-role="solid" class="${!spec.hole?'active':''}">Körper</button><button data-body-role="hole" class="${spec.hole?'active':''}">Bohrung</button></div><div class="section-title">POSITION</div><div class="fields-3">${field('X','position-x',spec.position?.[0]||0)}${field('Y','position-y',spec.position?.[1]||0)}${field('Z','position-z',spec.position?.[2]||0)}</div><div class="section-title">DREHUNG<span>° · X → Y → Z</span></div><div class="fields-3">${field('X','rotation-x',spec.rotation?.[0]||0,'°')}${field('Y','rotation-y',spec.rotation?.[1]||0,'°')}${field('Z','rotation-z',spec.rotation?.[2]||0,'°')}</div>${field('Skalierung · gleichmäßig','scale',spec.scale??1,'×')}${field('Materialdichte · 0 = unbekannt','density',spec.density??0,'g/cm³','min="0" max="30"')}<button class="primary" data-action="apply-dimensions">${icon('check')}Maße übernehmen</button><div class="body-actions"><button class="subtle-button" data-action="duplicate-body">Duplizieren</button><button class="subtle-button" data-action="ground-body">Auf Boden</button></div>${spec.kind==='boolean'?`<button class="subtle-button" data-action="ungroup" ${spec.features?.length?'disabled':''}>Kombination auflösen</button><p class="tip">Ausgangsformen bleiben bearbeitbar. Auflösen ist vor zusätzlichen Modellschritten möglich.</p>`:''}<div class="body-actions"><button class="subtle-button" data-action="copy-bodies">Kopieren</button><button class="subtle-button" data-action="cut-bodies">Ausschneiden</button><button class="subtle-button" data-action="paste-bodies">Einfügen</button></div><div class="volume"><span>Volumen</span><span>${fmt(model.volume)} mm³</span></div>${spec.density>0?`<div class="volume"><span>Masse</span><span>${fmt(model.volume*spec.density/1000,3)} g</span></div>`:''}${!selectedFace?'<hr class="divider"><p class="muted">Klicke auf eine Fläche, um dort eine Skizze anzulegen.</p>':''}</div>`;
 }
 function renderFeatureInspector(feature){
  const isSketch=feature.type==='extrude'||feature.type==='pocket',scale=currentSpec().scale??1;
  const profiles=isSketch?[feature.sketch,...(feature.contours??[])]:[],profile=profiles[Math.min(selectedContour,profiles.length-1)];
- $('#inspector').innerHTML=`<div class="inspector-heading">BEARBEITUNG ${selectedFeature+1}${icon(featureIcon(feature))}</div><div class="inspector-content"><h3>${esc(featureName(feature))}</h3>${isSketch?`${field('Höhe / Tiefe · alle Konturen','feature-depth',feature.depth*scale)}${feature.type==='pocket'?`<label class="locked-dimension"><input type="checkbox" data-feature-through-all ${feature.throughAll?'checked':''}> Durch alles ausschneiden</label>`:''}${profileSelector(profiles)}<div class="section-title">SKIZZE · ${sketchName(profile.kind).toUpperCase()}</div>${isRadial(profile.kind)?field('Radius','feature-radius',profile.radius*scale):`${field('Breite','feature-width',profile.width*scale)}${field('Höhe','feature-height',profile.height*scale)}`}${profile.kind==='polygon'?field('Seiten','feature-sides',profile.sides,''):''}${field('Winkel','feature-angle',profile.angle??0,'°')}${placementFields(profile.constraints,feature.supportRectangle??true,'feature',scale,profile.distanceReference)}<div class="fields-2">${field('Mitte U','feature-u',profile.center[0]*scale)}${field('Mitte V','feature-v',profile.center[1]*scale)}</div>`:field(feature.type==='shell'?'Wandstärke':feature.type==='fillet'?'Radius':'Fasenmaß','feature-size',(feature.thickness??feature.radius??feature.distance)*scale)}<button class="primary" data-action="apply-feature">${icon('check')}Änderung übernehmen</button><button class="subtle-button" data-action="show-body">Zurück zum Körper</button><p class="tip">Die folgenden Modellschritte werden mit deinen neuen Maßen erneut berechnet.</p></div>`;
+ $('#inspector').innerHTML=`<div class="inspector-heading">BEARBEITUNG ${selectedFeature+1}${icon(featureIcon(feature))}</div><div class="inspector-content"><h3>${esc(featureName(feature))}</h3>${isSketch?`${field('Höhe / Tiefe · alle Konturen','feature-depth',feature.depth*scale)}${feature.type==='pocket'?`<label class="locked-dimension"><input type="checkbox" data-feature-through-all ${feature.throughAll?'checked':''}> Durch alles ausschneiden</label>`:''}${profileSelector(profiles)}<div class="section-title">SKIZZE · ${sketchName(profile.kind).toUpperCase()}</div>${profile.kind==='polyline'?vertexEditor(profile,'feature',scale):isRadial(profile.kind)?field('Radius','feature-radius',profile.radius*scale):`${field('Breite','feature-width',profile.width*scale)}${field('Höhe','feature-height',profile.height*scale)}`}${profile.kind==='polygon'?field('Seiten','feature-sides',profile.sides,''):''}${field('Winkel','feature-angle',profile.angle??0,'°')}${placementFields(profile.constraints,feature.supportRectangle??true,'feature',scale,profile.distanceReference)}<div class="fields-2">${field('Mitte U','feature-u',profile.center[0]*scale)}${field('Mitte V','feature-v',profile.center[1]*scale)}</div>`:field(feature.type==='shell'?'Wandstärke':feature.type==='fillet'?'Radius':'Fasenmaß','feature-size',(feature.thickness??feature.radius??feature.distance)*scale)}<button class="primary" data-action="apply-feature">${icon('check')}Änderung übernehmen</button><div class="body-actions"><button class="subtle-button" data-action="suppress-feature">${feature.suppressed?'Aktivieren':'Unterdrücken'}</button><button class="subtle-button" data-action="rollback-feature">Bis hier anzeigen</button></div><div class="body-actions"><button class="subtle-button" data-reorder-feature="-1" ${selectedFeature===0?'disabled':''}>Früher</button><button class="subtle-button" data-reorder-feature="1" ${selectedFeature===currentSpec().features.length-1?'disabled':''}>Später</button></div><button class="subtle-button" data-action="show-body">Zurück zum Körper</button><p class="tip">Die folgenden Modellschritte werden mit deinen neuen Maßen erneut berechnet.</p></div>`;
  syncPlacementControls();
+}
+function parameterField(spec,label,key,inputKey){
+ const value=spec.expressions?.[key]??spec.params[key]??SHAPES[spec.kind]?.params[key];
+ return `<label class="field"><span>${esc(label)} <small>· Zahl / Formel</small></span><input type="text" data-field="${esc(inputKey)}" value="${esc(value)}" aria-label="${esc(label)}" spellcheck="false" title="Projektvariable oder Formel, z. B. breite / 2"></label>`;
+}
+function readParameter(spec,key,inputKey){
+ const value=$(`[data-field="${inputKey}"]`).value.trim(),variables=resolveVariables(project.variables??{});
+ spec.params[key]=evaluateExpression(value,name=>variables[name]);
+ if(value!==''&&Number.isFinite(Number(value))){if(spec.expressions)delete spec.expressions[key];}
+ else{spec.expressions??={};spec.expressions[key]=value;}
 }
 function inputNumber(key){const el=$(`[data-field="${key}"]`);const n=Number(el?.value);if(!el||!el.value||!Number.isFinite(n))throw new Error('Bitte gültige Zahlen eintragen.');return n;}
 async function applyDimensions(){
  try{
   const next=clone(project),spec=next.objects.find(o=>o.id===selectedId);
   spec.name=$('[data-field="body-name"]').value.trim()||'Körper';
-  for(const [key] of SHAPES[spec.kind]?.fields||[])spec.params[key]=inputNumber(key);
+  for(const [key] of SHAPES[spec.kind]?.fields||[])readParameter(spec,key,key);
   if(spec.kind==='profile'){
-   spec.params.height=inputNumber('height');const profile=[spec.profile,...(spec.contours??[])][selectedContour];profile.role=$('[data-field="profile-role"]').value;
+   spec.operation=$('[data-profile-operation]').value;
+   if(spec.operation==='revolve'){spec.params.revolveAngle=inputNumber('revolveAngle');spec.params.axisOffset=inputNumber('axisOffset');}else spec.params.height=inputNumber('height');
+   if(spec.operation==='loft')for(const key of Object.keys(loftDefaults))spec.params[key]=inputNumber(key);
+   if(spec.operation==='sweep')spec.sweepPath=readSweepPath();
+   const profile=[spec.profile,...(spec.contours??[])][selectedContour];profile.role=$('[data-field="profile-role"]').value;
    if(spec.contours)profile.center=[inputNumber('profile-u'),inputNumber('profile-v')];
-   for(const key of isRadial(profile.kind)?['radius']:['width','height'])profile[key]=inputNumber('profile-'+key);
+   if(profile.kind==='polyline')profile.vertices=readVertices(profile,'profile');
+   for(const key of profile.kind==='polyline'?[]:isRadial(profile.kind)?['radius']:['width','height'])profile[key]=inputNumber('profile-'+key);
    if(profile.kind==='polygon')profile.sides=inputNumber('profile-sides');profile.angle=inputNumber('profile-angle');
   }
   if(spec.kind==='boolean')for(const [i,operand] of spec.operands.entries()){
-   for(const [key] of SHAPES[operand.kind]?.fields||[])operand.params[key]=inputNumber('operand-'+i+'-'+key);
+   for(const [key] of SHAPES[operand.kind]?.fields||[])readParameter(operand,key,'operand-'+i+'-'+key);
    operand.position=['x','y','z'].map(axis=>inputNumber('operand-'+i+'-'+axis));
   }
+  if(spec.kind==='mirror'){
+   spec.axis=$('[data-mirror-axis]').value;spec.offset=inputNumber('mirror-offset');
+   spec.source.params??={};
+   for(const [key] of SHAPES[spec.source.kind]?.fields||[])readParameter(spec.source,key,'mirror-source-'+key);
+  }
+  spec.density=inputNumber('density');if(spec.density<0||spec.density>30)throw new Error('Dichte zwischen 0 und 30 g/cm³ eingeben.');
   spec.rotation=['x','y','z'].map(d=>inputNumber('rotation-'+d));spec.scale=inputNumber('scale');
   spec.position=['x','y','z'].map(d=>inputNumber('position-'+d));
   await commit(next,{message:'Maße übernommen'});
@@ -251,33 +318,46 @@ async function applyFeature(){
    profile.angle=inputNumber('feature-angle');if(profile.kind==='polygon')profile.sides=inputNumber('feature-sides');
    profile.constraints=readPlacement('feature',scale);profile.distanceReference=$('[data-distance-reference]').value;
    f.throughAll=f.type==='pocket'&&!!$('[data-feature-through-all]')?.checked;f.depth=inputNumber('feature-depth')/scale;profile.center=[inputNumber('feature-u')/scale,inputNumber('feature-v')/scale];
-   if(isRadial(profile.kind))profile.radius=inputNumber('feature-radius')/scale;else{profile.width=inputNumber('feature-width')/scale;profile.height=inputNumber('feature-height')/scale;}
+   if(profile.kind==='polyline')profile.vertices=readVertices(profile,'feature',scale);else if(isRadial(profile.kind))profile.radius=inputNumber('feature-radius')/scale;else{profile.width=inputNumber('feature-width')/scale;profile.height=inputNumber('feature-height')/scale;}
   }else if(f.type==='shell')f.thickness=inputNumber('feature-size')/scale;else if(f.type==='fillet')f.radius=inputNumber('feature-size')/scale;else f.distance=inputNumber('feature-size')/scale;
   await commit(next,{message:'Bearbeitung geändert'});
  }catch(e){toast(e.message,true);}
 }
 async function applyShell(){
  if(busy||!selectedFace||!currentSpec())return;
+ if(!allowNewFeature())return;
  try{const next=clone(project),spec=next.objects.find(o=>o.id===selectedId);spec.features.push({type:'shell',closed:$('#shell-closed').checked,face:selectedFace.id,reference:selectedFace.reference,thickness:inputNumber('shell-thickness')/(spec.scale??1)});if(await commit(next,{message:'Körper ausgehöhlt · Wandstärke im Verlauf änderbar'})){selectedFace=null;renderPanels();renderSelection();}}catch(e){toast(e.message,true);}
 }
 async function applyEdge(){
  if(!selectedEdges.size||!currentSpec())return;
+ if(!allowNewFeature())return;
  try{const next=clone(project),spec=next.objects.find(o=>o.id===selectedId);const feature={type:tool,edges:[...selectedEdges],references:[...selectedEdges].map(id=>currentModel().edges.find(e=>e.id===id)?.reference)};feature[tool==='fillet'?'radius':'distance']=inputNumber('edge-size')/(spec.scale??1);spec.features.push(feature);if(await commit(next,{message:tool==='fillet'?'Kanten abgerundet':'Kanten angefast'}))setTool('select');}catch(e){toast(e.message,true);}
 }
 function updateToolButtons(){
  $$('[data-tool]').forEach(b=>{b.classList.toggle('active',b.dataset.tool===tool);});
- $('#mode-pill').textContent=sketch?(sketchName(sketch.kind)+' aufziehen oder Maße eingeben'):tool==='fillet'?'Kanten für die Rundung auswählen':tool==='chamfer'?'Kanten für die Fase auswählen':tool==='move'?'Körper auf der XY-Ebene verschieben':'Körper oder Fläche auswählen';
+ $('#mode-pill').textContent=sketch?(sketchName(sketch.kind)+' aufziehen oder Maße eingeben'):tool==='fillet'?'Kanten für die Rundung auswählen':tool==='chamfer'?'Kanten für die Fase auswählen':tool==='move'?`Auswahl in ${moveSettings.plane.toUpperCase()} verschieben · Alt: ohne Raster · Esc: abbrechen`:'Körper oder Fläche auswählen';
  renderer.domElement.style.cursor=sketch?'crosshair':tool==='move'?'move':tool==='fillet'||tool==='chamfer'?'crosshair':'default';
+ if(tool==='rotate'||tool==='scale')$('#mode-pill').textContent=tool==='rotate'?'Farbringe ziehen · Esc bricht ab':'Griffe ziehen · gleichmäßig skalieren · Esc bricht ab';
+ if(tool==='pattern')$('#mode-pill').textContent='Kopien und Spiegeln · Körper auswählen, Maße rechts eingeben';
+ if(tool==='measure'){$('#mode-pill').textContent='Messen · zwei Körper anklicken oder über Häkchen auswählen';renderer.domElement.style.cursor='crosshair';}
 }
 function setTool(next){
  if(busy)return;
+ cancelMovePreview();cancelMarquee();cancelTransform();clearSection();
  if(next==='sketch'){startSketch();return;}
- if(sketch&&!cancelSketch())return;tool=next;selectedEdges.clear();hoverEdge=null;selectedFeature=-1;renderSelection();renderInspector();updateToolButtons();
+ if(next==='measure')measurementResult=null;
+ if(sketch&&!cancelSketch())return;tool=next;selectedEdges.clear();hoverEdge=null;selectedFeature=-1;renderSelection();renderInspector();updateToolButtons();syncTransformHandle();
 }
 function startSketch(){
  if(busy||sketch)return;
+ if(!allowNewFeature())return;
+ if(currentSpec()?.locked){toast('Den Körper zuerst entsperren.',true);return;}
  if(!selectedFace?.planar){toast('Klicke zuerst eine ebene Fläche am Bauteil an.');return;}
  beginSketch(clone(selectedFace),false);
+}
+function allowNewFeature(){
+ if(currentSpec()?.rollback!=null){toast('Zuerst alle Modellschritte wiederherstellen, bevor du eine neue Bearbeitung anlegst.',true);return false;}
+ return true;
 }
 function startPlaneSketch(){
  if(busy||sketch)return;
@@ -286,7 +366,7 @@ function startPlaneSketch(){
 function beginSketch(face,standalone){
  stopSketchPreview();sketchPreview={objectId:uid(),enabled:true,mode:'extrude',generation:0,signature:'',desired:null,client:null,request:null,timer:null,state:'idle',message:'Kontur zeichnen, um die Vorschau zu sehen.',view3d:false};
  draftBase={projectId:activeProjectId,revision:projectRevision,project:clone(project)};draftId=null;draftSourceId=null;lastDraftSignature='';draftPersisted=true;
- sketch={face,standalone,kind:'rectangle',center:[0,0],width:10,height:10,radius:5,sides:6,angle:0,depth:10,snap:1,hasDrawn:false,locks:{},invalid:{},constraints:{},distanceReference:'outline',role:'solid',throughAll:false,profiles:[],activeContour:0};tool='sketch';sketch.profiles=[captureContour()];
+ sketch={face,standalone,kind:'rectangle',center:[0,0],width:10,height:10,radius:5,sides:6,angle:0,depth:10,snap:1,hasDrawn:false,locks:{},invalid:{},constraints:{},distanceReference:'outline',role:'solid',throughAll:false,operation:'extrude',revolveAngle:360,axisOffset:0,loft:{...loftDefaults},sweepPath:defaultSweepPath(),vertices:[],closed:false,profiles:[],activeContour:0};tool='sketch';sketch.profiles=[captureContour()];
  savedCamera={position:camera.position.clone(),up:camera.up.clone(),target:controls.target.clone(),height:viewHeight,zoom:camera.zoom};
  const origin=vec(face.origin),normal=vec(face.normal);camera.position.copy(origin).addScaledVector(normal,200);camera.up.copy(vec(face.v));camera.lookAt(origin);controls.target.copy(origin);controls.enableRotate=false;controls.mouseButtons.RIGHT=THREE.MOUSE.PAN;
  const aspect=viewport.clientWidth/viewport.clientHeight;viewHeight=Math.max((currentModel()?vec(currentModel().bounds.max).sub(vec(currentModel().bounds.min)).length():60)*1.2/Math.min(aspect,1),40);camera.zoom=1;resize();controls.update();
@@ -307,14 +387,14 @@ function cancelSketch({discard=false}={}){
  renderSelection();renderPanels();updateToolButtons();return true;
 }
 function captureSketchDraft(){
- saveContour();return validateDraft({version:1,standalone:sketch.standalone,bodyId:sketch.standalone?null:selectedId,face:clone(sketch.face),profiles:clone(sketch.profiles),activeContour:sketch.activeContour,depth:sketch.depth,snap:sketch.snap,throughAll:sketch.throughAll});
+ saveContour();return validateDraft({version:1,standalone:sketch.standalone,bodyId:sketch.standalone?null:selectedId,face:clone(sketch.face),profiles:clone(sketch.profiles),activeContour:sketch.activeContour,depth:sketch.depth,snap:sketch.snap,throughAll:sketch.throughAll,operation:sketch.operation,revolveAngle:sketch.revolveAngle,axisOffset:sketch.axisOffset,loft:sketch.loft,sweepPath:sketch.sweepPath});
 }
 function persistSketchDraft(){
  clearTimeout(draftTimer);if(!sketch||!draftBase)return true;
  try{
   const data=captureSketchDraft(),signature=JSON.stringify(data);
   if(signature===lastDraftSignature&&draftPersisted)return true;
-  if(!data.profiles.some(p=>p.hasDrawn)){
+  if(!data.profiles.some(p=>p.hasDrawn||p.vertices?.length)){
    if(draftId)drafts.remove(draftId);if(draftSourceId)drafts.remove(draftSourceId);
    draftId=null;draftSourceId=null;lastDraftSignature=signature;draftPersisted=true;return true;
   }
@@ -335,7 +415,7 @@ function restoreSketchDraft(record){
  }
  beginSketch(face,data.standalone);
  sketch.profiles=clone(data.profiles);sketch.activeContour=data.activeContour;
- Object.assign(sketch,clone(sketch.profiles[data.activeContour]),{depth:data.depth,snap:data.snap,throughAll:data.throughAll});
+ Object.assign(sketch,clone(sketch.profiles[data.activeContour]),{depth:data.depth,snap:data.snap,throughAll:data.throughAll,operation:data.operation??'extrude',revolveAngle:data.revolveAngle??360,axisOffset:data.axisOffset??0,loft:data.loft??{...loftDefaults},sweepPath:data.sweepPath??defaultSweepPath()});
  draftSourceId=record.id||null;draftId=record.owner===drafts.owner?record.id:null;
  renderSketchInspector();drawSketch();updateToolButtons();persistSketchDraft();toast('Skizzenentwurf wiederhergestellt');
 }
@@ -358,7 +438,7 @@ window.addEventListener('beforeunload',event=>{
 function renderSketchInspector(){
  if(!sketch)return;const s=sketch;
  const dimension=(label,key,value)=>`${skField(label,key,value)}<label class="locked-dimension"><input type="checkbox" data-lock="${key}" ${s.locks[key]?'checked':''}> Maß festhalten</label>`;
- $('#inspector').innerHTML=`<div class="inspector-heading">${s.standalone?'SKIZZE · XY-EBENE':'SKIZZE AUF FLÄCHE '+s.face.id}${icon('sketch')}</div><div class="inspector-content">${contourList()}<p class="tool-description">Kontur zeichnen oder Maße direkt eingeben.</p><div class="sketch-types">${['rectangle','circle','ellipse','polygon'].map(kind=>`<button data-sketch-kind="${kind}" class="${s.kind===kind?'active':''}">${sketchName(kind)}</button>`).join('')}</div><div class="sketch-status" id="sketch-status"></div>${isRadial(s.kind)?dimension('Radius','radius',s.radius):`<div class="fields-2"><div>${dimension('Breite','width',s.width)}</div><div>${dimension('Höhe','height',s.height)}</div></div>`}${s.kind==='circle'?skField('Durchmesser','diameter',s.radius*2):''}${s.kind==='polygon'?skField('Seiten','sides',s.sides,''):''}${skField('Winkel','angle',s.angle,'°')}${placementFields(s.constraints,!!s.face.sketchBounds,'sketch',1,s.distanceReference)}<div class="section-title">MITTELPUNKT</div><div class="fields-2">${skField('U','center-u',s.center[0])}${skField('V','center-v',s.center[1])}</div><hr class="divider">${skField('Höhe / Tiefe','depth',s.depth)}${s.standalone?'':`<label class="locked-dimension"><input type="checkbox" data-through-all ${s.throughAll?'checked':''}> Ausschneiden: Durch alles</label>`}<div class="action-duo"><button class="primary" data-action="extrude">${icon('extrude')}Aufbauen</button>${s.standalone?'':`<button class="subtle-button" data-action="pocket">${icon('cut')}Ausschneiden</button>`}</div><button class="subtle-button" data-action="cancel-sketch">Skizze verwerfen</button>${skField('Fangraster','snap',s.snap)}<p class="tip">Eingegebene Konturmaße bleiben beim Zeichnen fest. Fangraster 0 schaltet das Einrasten aus.</p></div>`;
+ $('#inspector').innerHTML=`<div class="inspector-heading">${s.standalone?'SKIZZE · XY-EBENE':'SKIZZE AUF FLÄCHE '+s.face.id}${icon('sketch')}</div><div class="inspector-content">${contourList()}<p class="tool-description">Kontur zeichnen oder Maße direkt eingeben.</p><div class="sketch-types">${['rectangle','circle','ellipse','polygon','slot','polyline'].map(kind=>`<button data-sketch-kind="${kind}" class="${s.kind===kind?'active':''}">${sketchName(kind)}</button>`).join('')}</div><div class="sketch-status" id="sketch-status"></div>${s.kind==='polyline'?vertexEditor(s,'sketch'):isRadial(s.kind)?dimension('Radius','radius',s.radius):`<div class="fields-2"><div>${dimension('Breite','width',s.width)}</div><div>${dimension('Höhe','height',s.height)}</div></div>`}${s.kind==='circle'?skField('Durchmesser','diameter',s.radius*2):''}${s.kind==='polygon'?skField('Seiten','sides',s.sides,''):''}${skField('Winkel','angle',s.angle,'°')}${placementFields(s.constraints,!!s.face.sketchBounds,'sketch',1,s.distanceReference)}<div class="section-title">MITTELPUNKT</div><div class="fields-2">${skField('U','center-u',s.center[0])}${skField('V','center-v',s.center[1])}</div><hr class="divider">${s.standalone?profileOperationFields(s,'sketch'):''}${['revolve','sweep'].includes(s.operation)&&s.standalone?'':skField('Höhe / Tiefe','depth',s.depth)}${s.standalone?'':`<label class="locked-dimension"><input type="checkbox" data-through-all ${s.throughAll?'checked':''}> Ausschneiden: Durch alles</label>`}<div class="action-duo"><button class="primary" data-action="extrude">${icon('extrude')}${s.standalone?({revolve:'Rotieren',loft:'Loft erzeugen',sweep:'Sweep erzeugen'})[s.operation]||'Aufbauen':'Aufbauen'}</button>${s.standalone?'':`<button class="subtle-button" data-action="pocket">${icon('cut')}Ausschneiden</button>`}</div><button class="subtle-button" data-action="cancel-sketch">Skizze verwerfen</button>${skField('Fangraster','snap',s.snap)}<p class="tip">Eingegebene Konturmaße bleiben beim Zeichnen fest. Fangraster 0 schaltet das Einrasten aus.</p></div>`;
  const actions=$('.action-duo',$('#inspector'));
  actions.insertAdjacentHTML('beforebegin',`<section class="sketch-preview-panel"><label class="locked-dimension"><input type="checkbox" id="sketch-preview-enabled" ${sketchPreview?.enabled?'checked':''}> Live-Vorschau</label><div class="preview-mode-buttons"><button data-preview-mode="extrude">Aufbauen</button>${s.standalone?'':'<button data-preview-mode="pocket">Ausschneiden</button>'}</div><p id="sketch-preview-status" role="status"></p><button class="subtle-button" id="sketch-preview-3d">3D ansehen</button></section>`);
  syncSketchInputs();syncSketchPreviewPanel();
@@ -366,26 +446,26 @@ function renderSketchInspector(){
 function skField(label,key,value,unit='mm'){return field(label,'sk-'+key,value,unit).replace(`data-field="sk-${key}"`,`data-sketch="${key}"`);}
 function setSketchDimension(key,raw,input){
  if(!sketch||busy)return;const n=Number(raw),positive=['width','height','radius','diameter','depth'].includes(key);
- const valid=raw!==''&&Number.isFinite(n)&&Math.abs(n)<=10000&&(!positive||n>=.01)&&(!key.startsWith('distance-')||n>=0)&&(key!=='snap'||n>=0)&&(key!=='sides'||Number.isInteger(n)&&n>=3&&n<=64);
+ const valid=raw!==''&&Number.isFinite(n)&&Math.abs(n)<=10000&&(!positive||n>=.01)&&(key!=='revolveAngle'||n>0&&n<=360)&&(key!=='topScale'||n>=.01&&n<=100)&&(!key.startsWith('distance-')||n>=0)&&(key!=='snap'||n>=0)&&(key!=='sides'||Number.isInteger(n)&&n>=3&&n<=64);
  sketch.invalid[key]=!valid;input?.setCustomValidity(valid?'':'Bitte ein gültiges Maß eingeben.');
  if(valid){
   if(key==='depth'||key==='snap')for(const p of sketch.profiles)p.invalid[key]=false;
   if(key==='radius'||key==='diameter'){sketch.invalid.radius=false;sketch.invalid.diameter=false;}
   if(key.startsWith('distance-')){const axis=key.at(-1);if(sketch.constraints[axis])sketch.constraints[axis].distance=n;}
-  else if(key==='center-u'){sketch.center[0]=n;delete sketch.constraints.u;}else if(key==='center-v'){sketch.center[1]=n;delete sketch.constraints.v;}else if(key==='diameter')sketch.radius=n/2;else sketch[key]=n;
+  else if(Object.hasOwn(loftDefaults,key))sketch.loft[key]=n;else if(key==='center-u'){sketch.center[0]=n;delete sketch.constraints.u;}else if(key==='center-v'){sketch.center[1]=n;delete sketch.constraints.v;}else if(key==='diameter')sketch.radius=n/2;else sketch[key]=n;
   if(['width','height','radius','diameter'].includes(key))sketch.locks[key==='diameter'?'radius':key]=true;
-  if(key!=='snap'&&key!=='depth')sketch.hasDrawn=true;
+  if(key!=='snap'&&key!=='depth'&&sketch.kind!=='polyline')sketch.hasDrawn=true;
  }
  syncSketchInputs();drawSketch();
 }
 function syncSketchInputs(){
- if(!sketch)return;applySketchPosition();saveContour();const values={...sketch,'distance-u':sketch.constraints.u?.distance??0,'distance-v':sketch.constraints.v?.distance??0,diameter:sketch.radius*2,'center-u':sketch.center[0],'center-v':sketch.center[1]},invalid=sketch.profiles.some(p=>Object.values(p.invalid).some(Boolean));
+ if(!sketch)return;applySketchPosition();saveContour();const values={...sketch,...sketch.loft,'distance-u':sketch.constraints.u?.distance??0,'distance-v':sketch.constraints.v?.distance??0,diameter:sketch.radius*2,'center-u':sketch.center[0],'center-v':sketch.center[1]},invalid=sketch.profiles.some(p=>Object.values(p.invalid).some(Boolean));
  $$('[data-sketch]').forEach(el=>{if(document.activeElement!==el&&!sketch.invalid[el.dataset.sketch])el.value=Math.round(values[el.dataset.sketch]*1000)/1000;});
  $$('[data-lock]').forEach(el=>el.checked=!!sketch.locks[el.dataset.lock]);
  for(const axis of ['u','v']){const el=$(`[data-sketch="center-${axis}"]`);if(el)el.disabled=!!sketch.constraints[axis];}
  syncPlacementControls();
- const status=$('#sketch-status');if(status){status.classList.toggle('ready',sketch.hasDrawn&&!invalid);status.textContent=invalid?'Bitte ungültige Maße korrigieren':sketch.hasDrawn?'Kontur bereit · Maße anpassbar':'Mit gedrückter linker Maustaste aufziehen';}
- $$('[data-action="extrude"],[data-action="pocket"]').forEach(b=>b.disabled=!sketch.profiles.some(p=>p.hasDrawn)||invalid||busy);
+ const status=$('#sketch-status');if(status){status.classList.toggle('ready',sketch.hasDrawn&&!invalid);status.textContent=invalid?'Bitte ungültige Maße korrigieren':sketch.hasDrawn?'Kontur bereit · Maße anpassbar':sketch.kind==='polyline'?'Punkte anklicken · zum Schließen den Startpunkt anklicken':'Mit gedrückter linker Maustaste aufziehen';}
+ $$('[data-action="extrude"],[data-action="pocket"]').forEach(b=>b.disabled=!sketch.profiles.some(p=>p.hasDrawn)||sketch.profiles.some(p=>p.kind==='polyline'&&!p.closed&&p.vertices?.length)||invalid||busy);
 }
 function toSketchWorld(u,v,lift=.06){return vec(sketch.face.origin).addScaledVector(vec(sketch.face.u),u).addScaledVector(vec(sketch.face.v),v).addScaledVector(vec(sketch.face.normal),lift);}
 function drawSketch(){
@@ -400,18 +480,23 @@ function drawSketch(){
  for(const [i,profile] of s.profiles.entries())if(i!==s.activeContour&&profile.hasDrawn){
   const line=new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(contourPoints(profile)),new THREE.LineBasicMaterial({color:profile.role==='hole'?0xd78835:0x579aab,depthTest:false}));line.renderOrder=21;sketchRoot.add(line);
  }
- if(!s.hasDrawn)return;
+ if(!s.hasDrawn&&!(s.kind==='polyline'&&s.vertices?.length))return;
  let points=[];const [cu,cv]=s.center,angle=s.angle*Math.PI/180;
  const point=(x,y)=>toSketchWorld(cu+x*Math.cos(angle)-y*Math.sin(angle),cv+x*Math.sin(angle)+y*Math.cos(angle));
- if(s.kind==='rectangle')points=[[-s.width/2,-s.height/2],[s.width/2,-s.height/2],[s.width/2,s.height/2],[-s.width/2,s.height/2]].map(([x,y])=>point(x,y));
+ if(s.kind==='polyline'||s.kind==='slot')points=profilePoints(s).map(([x,y])=>point(x,y));
+ else if(s.kind==='rectangle')points=[[-s.width/2,-s.height/2],[s.width/2,-s.height/2],[s.width/2,s.height/2],[-s.width/2,s.height/2]].map(([x,y])=>point(x,y));
  else {const count=s.kind==='polygon'?s.sides:96;for(let i=0;i<count;i++){const a=i*Math.PI*2/count+(s.kind==='polygon'?Math.PI/2:0);points.push(point(Math.cos(a)*(s.kind==='ellipse'?s.width/2:s.radius),Math.sin(a)*(s.kind==='ellipse'?s.height/2:s.radius)));}}
- const line=new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(points),new THREE.LineBasicMaterial({color:s.role==='hole'?0xd78835:0x008c7b,depthTest:false}));line.renderOrder=20;sketchRoot.add(line);
- const center=toSketchWorld(cu,cv),fillPositions=[];
- for(let i=0;i<points.length;i++)fillPositions.push(...center.toArray(),...points[i].toArray(),...points[(i+1)%points.length].toArray());
+ const line=new (s.kind==='polyline'&&!s.closed?THREE.Line:THREE.LineLoop)(new THREE.BufferGeometry().setFromPoints(points),new THREE.LineBasicMaterial({color:s.role==='hole'?0xd78835:0x008c7b,depthTest:false}));line.renderOrder=20;sketchRoot.add(line);
+ if(s.kind==='polyline'){
+  const dots=new THREE.Points(new THREE.BufferGeometry().setFromPoints(points),new THREE.PointsMaterial({color:0xe69b3a,size:9,sizeAttenuation:false,depthTest:false}));dots.renderOrder=25;sketchRoot.add(dots);
+  if(!s.closed)return;
+ }
+ const fillPositions=[];
+ for(const tri of THREE.ShapeUtils.triangulateShape(profilePoints(s).map(p=>new THREE.Vector2(...p)),[]))for(const i of tri)fillPositions.push(...points[i].toArray());
  const fillGeom=new THREE.BufferGeometry();fillGeom.setAttribute('position',new THREE.Float32BufferAttribute(fillPositions,3));const fill=new THREE.Mesh(fillGeom,new THREE.MeshBasicMaterial({color:0x1cb79e,transparent:true,opacity:.16,depthTest:false,side:THREE.DoubleSide,depthWrite:false}));fill.renderOrder=19;fill.userData.sketchFill=true;fill.visible=!previewRoot.children.length;sketchRoot.add(fill);
  const offset=viewHeight/camera.zoom/viewport.clientHeight*32;
  if(isRadial(s.kind))sketchDimension(point(s.kind==='circle'?-s.radius:0,0),point(s.radius,0),s.kind==='circle'?'diameter':'radius',s.kind==='circle'?s.radius*2:s.radius);
- else {sketchDimension(point(-s.width/2,-s.height/2-offset),point(s.width/2,-s.height/2-offset),'width',s.width);sketchDimension(point(s.width/2+offset,-s.height/2),point(s.width/2+offset,s.height/2),'height',s.height);}
+ else if(s.kind!=='polyline'){sketchDimension(point(-s.width/2,-s.height/2-offset),point(s.width/2,-s.height/2-offset),'width',s.width);sketchDimension(point(s.width/2+offset,-s.height/2),point(s.width/2+offset,s.height/2),'height',s.height);}
  drawPlacementDimensions();
 
 }
@@ -440,11 +525,12 @@ function sketchCandidate(type){
  const profiles=s.profiles.filter(p=>p.hasDrawn).map(p=>{
   const profile={kind:p.kind,center:p.center.map(v=>v/scale),angle:p.angle,role:p.role,distanceReference:p.distanceReference};
   if(!s.standalone)profile.constraints=Object.fromEntries(Object.entries(p.constraints).map(([axis,c])=>[axis,{...c,...(c.mode==='center'?{}:{distance:c.distance/scale})}]));
-  if(!isRadial(p.kind)){profile.width=p.width/scale;profile.height=p.height/scale;}else {profile.radius=p.radius/scale;if(p.kind==='polygon')profile.sides=p.sides;}
+  if(p.kind==='polyline'){profile.vertices=p.vertices.map(v=>({...v,x:v.x/scale,y:v.y/scale}));profile.closed=p.closed;}
+  else if(!isRadial(p.kind)){profile.width=p.width/scale;profile.height=p.height/scale;}else {profile.radius=p.radius/scale;if(p.kind==='polygon')profile.sides=p.sides;}
   return profile;
  });
  const [profile,...contours]=profiles;
- if(s.standalone)next.objects.push({id:sketchPreview.objectId,name:sketchName(profile.kind),kind:'profile',profile,contours,plane:'XY',params:{height:s.depth},position:[0,0,0],features:[],color:'#67aba9'});
+ if(s.standalone)next.objects.push({id:sketchPreview.objectId,name:sketchName(profile.kind),kind:'profile',profile,contours,plane:'XY',operation:s.operation,sweepPath:s.sweepPath,params:{height:s.depth,revolveAngle:s.revolveAngle,axisOffset:s.axisOffset,...s.loft},position:[0,0,0],features:[],color:'#67aba9'});
  else spec.features.push({type,face:s.face.id,reference:s.face.reference,sketch:profile,contours,depth:s.depth/scale,...(type==='pocket'?{throughAll:s.throughAll}:{})});
  return {next,bodyId:s.standalone?sketchPreview.objectId:spec.id};
 }
@@ -483,10 +569,11 @@ function previewStatus(ctx,state,message){ctx.state=state;ctx.message=message;if
 function queueSketchPreview(){
  const ctx=sketchPreview;if(!sketch||!ctx||busy)return;
  saveContour();
- const signature=JSON.stringify([ctx.enabled,ctx.mode,sketch.profiles,sketch.depth,sketch.throughAll]);
+ const signature=JSON.stringify([ctx.enabled,ctx.mode,sketch.profiles,sketch.depth,sketch.throughAll,sketch.operation,sketch.revolveAngle,sketch.axisOffset,sketch.loft,sketch.sweepPath]);
  if(signature===ctx.signature)return;ctx.signature=signature;ctx.generation++;clearTimeout(ctx.timer);ctx.desired=null;clearSketchPreviewGeometry();
  if(!ctx.enabled){previewStatus(ctx,'disabled','Live-Vorschau ausgeschaltet.');return;}
  if(sketch.profiles.some(p=>Object.values(p.invalid).some(Boolean))){previewStatus(ctx,'error','Bitte ungültige Maße korrigieren.');return;}
+ if(sketch.profiles.some(p=>p.kind==='polyline'&&!p.closed&&p.vertices?.length)){previewStatus(ctx,'idle','Linienzug schließen, um die Vorschau zu sehen.');return;}
  if(!sketch.profiles.some(p=>p.hasDrawn)){previewStatus(ctx,'idle','Kontur zeichnen, um die Vorschau zu sehen.');return;}
  const {next,bodyId}=sketchCandidate(ctx.mode);
  if(next.objects.length>30){previewStatus(ctx,'error','Maximal 30 Körper pro Projekt möglich.');return;}
@@ -506,8 +593,9 @@ async function runSketchPreview(ctx){
   previewRoot.add(new THREE.Mesh(geometry,new THREE.MeshStandardMaterial({color:ctx.mode==='pocket'?0xd6a464:0x67aba9,roughness:.52,metalness:.06,side:THREE.DoubleSide,polygonOffset:true,polygonOffsetFactor:1,polygonOffsetUnits:1})));
   for(const edge of model.edges)if(edge.points.length>1)previewRoot.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(edge.points.map(vec)),new THREE.LineBasicMaterial({color:0x355d65})));
   const original=groups.get(request.bodyId);if(original)original.visible=false;overlayRoot.visible=false;
+  if(sketch.standalone)for(const group of groups.values())group.visible=false;
   for(const child of sketchRoot.children)if(child.userData.sketchFill)child.visible=false;
-  ctx.bounds=model.bounds;ctx.volume=model.volume;previewStatus(ctx,'ready','Vorschau bereit · noch nicht übernommen');
+  ctx.bounds=model.bounds;ctx.volume=model.volume;previewStatus(ctx,'ready',sketch.standalone?'Vorschau bereit · andere Körper vorübergehend ausgeblendet · noch nicht übernommen':'Vorschau bereit · noch nicht übernommen');
  }catch(error){if(ctx===sketchPreview&&ctx.generation===request.generation){clearSketchPreviewGeometry();previewStatus(ctx,'error',error.message);}}
  finally{if(ctx.request===request){ctx.request=null;if(ctx===sketchPreview)runSketchPreview(ctx);}}
 }
@@ -528,15 +616,27 @@ renderer.domElement.addEventListener('contextmenu',e=>e.preventDefault());
 renderer.domElement.addEventListener('pointerdown',event=>{
  if(event.button!==0||busy)return;
  lastPointer={x:event.clientX,y:event.clientY};
+ if(sketch?.kind==='polyline'){handlePolylinePointer(event);return;}
  if(sketch){const point=sketchPoint(event);if(point){drag={kind:'sketch',start:point};renderer.domElement.setPointerCapture(event.pointerId);}return;}
+ if(tool==='section')return;
+ if(tool==='rotate'||tool==='scale'){if(!transformControl.dragging){const hit=pickBody(event);selectObject(hit?.object.userData.body??null,null,event.shiftKey);}return;}
+ if(tool==='select'&&!pickBody(event)){drag={kind:'marquee',start:[event.clientX,event.clientY],additive:event.shiftKey};renderer.domElement.setPointerCapture(event.pointerId);return;}
  if(tool==='move'){
-  const hit=pickBody(event);if(!hit)return;selectObject(hit.object.userData.body);
-  const spec=currentSpec(),plane=new THREE.Plane(new THREE.Vector3(0,0,1),-(spec.position?.[2]||0)),start=new THREE.Vector3();pointerRay(event).intersectPlane(plane,start);
-  drag={kind:'move',plane,start,position:clone(spec.position||[0,0,0]),delta:new THREE.Vector3()};renderer.domElement.setPointerCapture(event.pointerId);
+  if(!$('[data-move-snap]')?.checkValidity()){toast('Bitte ein gültiges Verschieberaster eingeben.',true);return;}
+  const hit=pickBody(event);if(!hit)return;
+  if(!selectedBodies.has(hit.object.userData.body))selectObject(hit.object.userData.body);
+  if(selectedSpecs().some(o=>o.locked)){toast('Die Auswahl enthält gesperrte Körper.',true);return;}
+  const normal=vec(({xy:[0,0,1],xz:[0,1,0],yz:[1,0,0]})[moveSettings.plane]),ray=pointerRay(event);
+  if(Math.abs(ray.direction.dot(normal))<.02){toast('Die Verschiebeebene steht seitlich zur Ansicht. Bitte die Ansicht drehen oder eine andere Ebene wählen.',true);return;}
+  const plane=new THREE.Plane().setFromNormalAndCoplanarPoint(normal,hit.point),start=new THREE.Vector3();if(!ray.intersectPlane(plane,start))return;
+  selectedFace=null;renderSelection();
+  drag={kind:'move',plane,start,positions:selectedSpecs().map(o=>({id:o.id,position:clone(o.position??[0,0,0])})),delta:new THREE.Vector3()};renderer.domElement.setPointerCapture(event.pointerId);
  }
 });
 renderer.domElement.addEventListener('pointermove',event=>{
  if(busy)return;
+ if(drag?.kind==='marquee'){const r=viewport.getBoundingClientRect(),[x,y]=drag.start;Object.assign(marquee.style,{left:Math.min(x,event.clientX)-r.left+'px',top:Math.min(y,event.clientY)-r.top+'px',width:Math.abs(x-event.clientX)+'px',height:Math.abs(y-event.clientY)+'px'});marquee.hidden=false;return;}
+ if(drag?.kind==='vertex'&&sketch){const p=sketchPoint(event);if(p){const local=localSketchPoint(p);Object.assign(sketch.vertices[drag.index],{x:local[0],y:local[1]});sketch.invalid.vertices=false;syncSketchInputs();drawSketch();}return;}
  if(drag?.kind==='sketch'&&sketch){
   const point=sketchPoint(event);if(!point)return;
   const [a,b]=drag.start,[c,d]=point;
@@ -550,7 +650,10 @@ renderer.domElement.addEventListener('pointermove',event=>{
   sketch.hasDrawn=!isRadial(sketch.kind)?sketch.width>.05&&sketch.height>.05:sketch.radius>.05;syncSketchInputs();drawSketch();return;
  }
  if(drag?.kind==='move'){
-  const hit=new THREE.Vector3();if(!pointerRay(event).intersectPlane(drag.plane,hit))return;const delta=hit.sub(drag.start);delta.x=Math.round(delta.x);delta.y=Math.round(delta.y);delta.z=0;drag.delta.copy(delta);groups.get(selectedId)?.position.copy(delta);return;
+  const hit=new THREE.Vector3();if(!pointerRay(event).intersectPlane(drag.plane,hit))return;const delta=hit.sub(drag.start);
+  for(const axis of ['x','y','z']){if(!moveSettings.plane.includes(axis)||(moveSettings.axis!=='free'&&moveSettings.axis!==axis))delta[axis]=0;else if(!event.altKey&&moveSettings.snap>0)delta[axis]=Math.round(delta[axis]/moveSettings.snap)*moveSettings.snap;}
+  drag.delta.copy(delta);for(const item of drag.positions)groups.get(item.id)?.position.copy(delta);
+  const label=$('#move-delta');if(label)label.textContent=`Δ X ${fmt(delta.x,3)} · Y ${fmt(delta.y,3)} · Z ${fmt(delta.z,3)} mm`;return;
  }
  if(tool==='fillet'||tool==='chamfer'){
   const hit=pickEdge(event),next=hit?{body:hit.object.userData.body,id:hit.object.userData.edge}:null;
@@ -560,11 +663,23 @@ renderer.domElement.addEventListener('pointermove',event=>{
 renderer.domElement.addEventListener('pointerup',async event=>{
  if(event.button!==0)return;
  const moved=lastPointer?Math.hypot(event.clientX-lastPointer.x,event.clientY-lastPointer.y):0;
+ if(drag?.kind==='marquee'){finishMarquee(event);return;}
+ if(drag?.kind==='vertex'){drag=null;renderSketchInspector();drawSketch();return;}
  if(drag?.kind==='sketch'){drag=null;syncSketchInputs();return;}
  if(drag?.kind==='move'){
-  const movement=drag;drag=null;if(movement.delta.length()>.05){const next=clone(project);next.objects.find(o=>o.id===selectedId).position=movement.position.map((p,i)=>p+movement.delta.getComponent(i));if(!await commit(next,{message:'Körper verschoben'}))groups.get(selectedId)?.position.set(0,0,0);}return;
+  const movement=drag;drag=null;
+  if(movement.delta.length()>1e-7){
+   const next=clone(project);for(const item of movement.positions)next.objects.find(o=>o.id===item.id).position=item.position.map((p,i)=>p+movement.delta.getComponent(i));
+   if(await commit(next,{message:'Auswahl verschoben'})){selectedBodies=new Set(movement.positions.map(o=>o.id));renderBodies();renderPanels();}
+   else for(const item of movement.positions)groups.get(item.id)?.position.set(0,0,0);
+  }else for(const item of movement.positions)groups.get(item.id)?.position.set(0,0,0);
+  return;
  }
- if(busy||sketch||moved>5)return;
+ if(busy||sketch||['section','rotate','scale'].includes(tool)||moved>5)return;
+ if(tool==='measure'){
+  const hit=pickBody(event);if(!hit){selectObject(null);return;}
+  const id=hit.object.userData.body;selectObject(id,null,selectedBodies.has(id)||selectedBodies.size<2);return;
+ }
  if(tool==='fillet'||tool==='chamfer'){
   const hit=pickEdge(event);if(!hit)return;const id=hit.object.userData.body,edge=hit.object.userData.edge;
   if(id!==selectedId){selectedId=id;selectedBodies=new Set([id]);selectedEdges.clear();renderBodies();}
@@ -575,7 +690,7 @@ renderer.domElement.addEventListener('pointerup',async event=>{
  else selectObject(null);
 });
 renderer.domElement.addEventListener('dblclick',event=>{if(!sketch&&tool==='select'&&selectedFace?.planar)startSketch();});
-renderer.domElement.addEventListener('pointercancel',()=>{drag=null;groups.get(selectedId)?.position.set(0,0,0);});
+renderer.domElement.addEventListener('pointercancel',()=>{cancelMovePreview();cancelMarquee();cancelTransform();syncTransformHandle();drag=null;});
 controls.addEventListener('change',()=>{if(sketch?.hasDrawn)drawSketch();});
 
 async function addBody(kind){
@@ -613,11 +728,11 @@ async function openFile(file){
  }catch(e){setBusy(false);toast(e.message||'Datei konnte nicht geöffnet werden.',true);}
 }
 async function undo(){
- if(busy||!undoStack.length)return;if(sketch&&!cancelSketch())return;
+ if(busy||!undoStack.length)return;if(sketch&&!cancelSketch())return;cancelTransform();cancelMovePreview();cancelMarquee();
  const target=undoStack[undoStack.length-1],previous=clone(project);if(await commit(target,{record:false})){undoStack.pop();redoStack.push(previous);updateUndo();}
 }
 async function redo(){
- if(busy||!redoStack.length)return;if(sketch&&!cancelSketch())return;
+ if(busy||!redoStack.length)return;if(sketch&&!cancelSketch())return;cancelTransform();cancelMovePreview();cancelMarquee();
  const target=redoStack[redoStack.length-1],previous=clone(project);if(await commit(target,{record:false})){redoStack.pop();undoStack.push(previous);updateUndo();}
 }
 
@@ -631,9 +746,13 @@ document.addEventListener('click',async event=>{
  if(button?.dataset.openSaved){await openSaved(button.dataset.openSaved);return;}
  if(button?.dataset.duplicateProject){const entry=library.read(button.dataset.duplicateProject);if(entry){entry.project.name=(entry.project.name||'Projekt')+' Kopie';await newProject(entry.project);}return;}
  if(button?.dataset.deleteProject){const entry=library.read(button.dataset.deleteProject);if(entry&&entry.id!==activeProjectId&&confirm(`Projekt „${entry.project.name}“ aus dem Browser löschen?`)){try{await library.remove(entry.id,entry.revision);renderProjectList();}catch(e){toast(e.message,true);}}return;}
+ if(button?.dataset.openRegionSketch){openRegionSketch(button.dataset.openRegionSketch,button.dataset.regionBody);return;}
+ if(button?.dataset.openGenerator){openGenerator(button.dataset.openGenerator);return;}
  if(button?.dataset.tool){setTool(button.dataset.tool);return;}
  if(button?.dataset.view){setView(button.dataset.view);return;}
  if(button?.dataset.export){exportModel(button.dataset.export);return;}
+ if(button?.dataset.lockBody){if(project.objects.find(o=>o.id===button.dataset.lockBody)?.generated){openGenerator(project.objects.find(o=>o.id===button.dataset.lockBody).generated.generatorId);return;}const next=clone(project),o=next.objects.find(o=>o.id===button.dataset.lockBody);o.locked=!o.locked;await commit(next,{message:o.locked?'Körper gesperrt':'Körper entsperrt'});return;}
+ if(button?.dataset.reorderFeature){changeHistory('reorder',Number(button.dataset.reorderFeature));return;}
  if(button?.dataset.visibility){
   const next=clone(project),spec=next.objects.find(o=>o.id===button.dataset.visibility);spec.visible=spec.visible===false;await commit(next);return;
  }
@@ -644,14 +763,27 @@ document.addEventListener('click',async event=>{
  if(button?.dataset.bodyRole){const next=clone(project);next.objects.find(o=>o.id===selectedId).hole=button.dataset.bodyRole==='hole';await commit(next);return;}
  const row=event.target.closest('[data-body]');if(row){if(sketch&&!cancelSketch())return;setTool('select');selectObject(row.dataset.body,null,event.shiftKey);return;}
  if(button?.dataset.removeFeature!==undefined){
-  const next=clone(project),features=next.objects.find(o=>o.id===selectedId).features;const count=features.length-Number(button.dataset.removeFeature);features.splice(Number(button.dataset.removeFeature));await commit(next,{message:count>1?'Bearbeitung und nachfolgende Schritte entfernt · Strg Z zum Wiederherstellen':'Bearbeitung entfernt'});return;
+  const next=clone(project),spec=next.objects.find(o=>o.id===selectedId),features=spec.features;const count=features.length-Number(button.dataset.removeFeature);features.splice(Number(button.dataset.removeFeature));if(spec.rollback!=null)spec.rollback=Math.min(spec.rollback,features.length);await commit(next,{message:count>1?'Bearbeitung und nachfolgende Schritte entfernt · Strg Z zum Wiederherstellen':'Bearbeitung entfernt'});return;
  }
  const featureRow=event.target.closest('[data-feature]');if(featureRow){if(sketch&&!cancelSketch())return;tool='select';selectedFeature=Number(featureRow.dataset.feature);selectedContour=0;selectedFace=null;selectedEdges.clear();renderSelection();renderPanels();return;}
  if(button?.dataset.removeEdge){selectedEdges.delete(Number(button.dataset.removeEdge));renderSelection();renderInspector();return;}
  if(button?.dataset.contour!==undefined&&sketch){switchContour(Number(button.dataset.contour));return;}
  if(button?.dataset.contourRole&&sketch){sketch.role=button.dataset.contourRole;saveContour();renderSketchInspector();drawSketch();return;}
- if(button?.dataset.sketchKind&&sketch){sketch.kind=button.dataset.sketchKind;sketch.invalid={};applySketchPosition();renderSketchInspector();drawSketch();updateToolButtons();return;}
+ if(button?.dataset.sketchKind&&sketch){sketch.kind=button.dataset.sketchKind;sketch.vertices??=[];sketch.closed??=false;if(sketch.kind==='polyline')sketch.hasDrawn=sketch.closed;sketch.invalid={};applySketchPosition();renderSketchInspector();drawSketch();updateToolButtons();return;}
+ if(button?.dataset.removeSweepPoint!==undefined&&sketch){if(sketch.sweepPath.length>2)sketch.sweepPath.splice(Number(button.dataset.removeSweepPoint),1);renderSketchInspector();drawSketch();return;}
+ if(button?.dataset.removeVertex!==undefined&&sketch){sketch.vertices.splice(Number(button.dataset.removeVertex),1);sketch.closed=false;sketch.hasDrawn=false;renderSketchInspector();drawSketch();return;}
  switch(button?.dataset.action){
+  case 'apply-transform':applyNumericTransform();break;
+  case 'add-sweep-point':if(sketch&&sketch.sweepPath.length<32){const last=sketch.sweepPath.at(-1);sketch.sweepPath.push({id:uid(),x:last.x+10,y:last.y});renderSketchInspector();drawSketch();}break;
+  case 'copy-bodies':copyBodies(false);break;
+  case 'cut-bodies':copyBodies(true);break;
+  case 'paste-bodies':pasteClipboard();break;
+  case 'suppress-feature':changeHistory('suppress');break;
+  case 'rollback-feature':changeHistory('rollback');break;
+  case 'resume-history':changeHistory('resume');break;
+  case 'apply-section':applySection();break;
+  case 'close-polyline':closePolyline();break;
+  case 'reopen-polyline':if(sketch){sketch.closed=false;sketch.hasDrawn=false;renderSketchInspector();drawSketch();}break;
   case 'add-contour':addContour(false);break;
   case 'duplicate-contour':addContour(true);break;
   case 'remove-contour':removeContour();break;
@@ -670,13 +802,29 @@ document.addEventListener('click',async event=>{
   case 'pocket':applySketch('pocket');break;
   case 'show-body':selectedFeature=-1;renderPanels();break;
   case 'apply-feature':applyFeature();break;
+  case 'apply-pattern':applyBodyPattern();break;
+  case 'measure-distance':measureSelectedBodies();break;
   case 'delete-body':{if(!currentSpec()||busy)return;const next=clone(project);next.objects=next.objects.filter(o=>o.id!==selectedId);await commit(next,{message:'Körper gelöscht · Strg Z zum Wiederherstellen'});break;}
  }
  if(!event.target.closest('.export-wrap'))$('#export-menu').hidden=true;
 });
 $('#inspector').addEventListener('input',event=>{
+ if(event.target.hasAttribute('data-transform-snap')){const value=Number(event.target.value);if(Number.isFinite(value)&&value>=0){if(tool==='rotate')transformControl.setRotationSnap(value?value*Math.PI/180:null);else transformControl.setScaleSnap(value||null);}return;}
+ if(event.target.hasAttribute('data-sweep-point')&&sketch){const el=event.target,n=Number(el.value),valid=el.value!==''&&Number.isFinite(n)&&Math.abs(n)<=10000;el.setCustomValidity(valid?'':'Gültige Pfadkoordinate erforderlich.');sketch.invalid.sweepPath=$$('[data-sweep-point]').some(e=>!e.checkValidity());if(valid)sketch.sweepPath[Number(el.dataset.sweepPoint)][el.dataset.axis]=n;syncSketchInputs();drawSketch();return;}
+ if(event.target.hasAttribute('data-profile-operation')&&sketch){sketch.operation=event.target.value;renderSketchInspector();drawSketch();return;}
+ if(event.target.dataset.vertexScope==='sketch'&&sketch){
+  const el=event.target,n=Number(el.value),valid=el.value!==''&&Number.isFinite(n)&&Math.abs(n)<=10000;el.setCustomValidity(valid?'':'Gültige Koordinate erforderlich.');
+  sketch.invalid.vertices=$$('[data-vertex-scope="sketch"]').some(e=>!e.checkValidity());
+  if(valid)sketch.vertices[Number(el.dataset.vertexIndex)][el.dataset.vertexAxis]=n;
+  syncSketchInputs();drawSketch();return;
+ }
+ if(event.target.hasAttribute('data-move-plane')){moveSettings.plane=event.target.value;if(!moveSettings.plane.includes(moveSettings.axis))moveSettings.axis='free';renderMoveInspector();updateToolButtons();return;}
+ if(event.target.hasAttribute('data-move-axis')){moveSettings.axis=event.target.value;return;}
+ if(event.target.hasAttribute('data-move-snap')){const value=Number(event.target.value),valid=event.target.value!==''&&Number.isFinite(value)&&value>=0&&value<=10000;event.target.setCustomValidity(valid?'':'Raster zwischen 0 und 10000 mm eingeben.');if(valid)moveSettings.snap=value;return;}
  if(event.target.id==='sketch-preview-enabled'&&sketchPreview){resetSketchPreviewWork();sketchPreview.enabled=event.target.checked;queueSketchPreview();return;}
  if(!sketch&&!event.target.matches('[data-profile-select]'))inspectorDirty=true;
+ if(event.target.hasAttribute('data-profile-operation')){$$('[data-operation-options]').forEach(el=>el.hidden=el.dataset.operationOptions!==event.target.value);return;}
+ if(event.target.hasAttribute('data-pattern-mode')){patternMode=event.target.value;renderPatternInspector();return;}
  if(event.target.dataset.field==='edge-size'){const n=Number(event.target.value);if(Number.isFinite(n)&&n>0)edgeSize=n;}
  if(event.target.hasAttribute('data-through-all')&&sketch){sketch.throughAll=event.target.checked;queueSketchDraft();queueSketchPreview();return;}
  if(event.target.hasAttribute('data-distance-reference')){if(sketch){sketch.distanceReference=event.target.value;syncSketchInputs();drawSketch();}return;}
@@ -689,7 +837,11 @@ $('#inspector').addEventListener('input',event=>{
  if(event.target.dataset.lock){sketch.locks[event.target.dataset.lock]=event.target.checked;queueSketchDraft();return;}
  if(event.target.dataset.sketch)setSketchDimension(event.target.dataset.sketch,event.target.value,event.target);
 });
-$('#inspector').addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('input')&&!sketch&&!busy){event.preventDefault();if(event.target.dataset.field==='edge-size')applyEdge();else if(event.target.dataset.field==='shell-thickness')applyShell();else selectedFeature>=0?applyFeature():applyDimensions();}});
+$('#inspector').addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('input')&&!sketch&&!busy){event.preventDefault();if(tool==='pattern')applyBodyPattern();else if(tool==='rotate'||tool==='scale')applyNumericTransform();else if(event.target.dataset.field==='edge-size')applyEdge();else if(event.target.dataset.field==='shell-thickness')applyShell();else selectedFeature>=0?applyFeature():applyDimensions();}});
+const openRegionSketch=setupRegionEditor({getProject:()=>project,getProjectId:()=>activeProjectId,canOpen:()=>!busy&&!sketch&&!transformStart&&!drag&&!inspectorDirty,commit,getError:()=>lastCommitError,toast,onApplied:id=>selectObject(id)});
+$('#new-region-sketch').onclick=()=>openRegionSketch();
+const openGenerator=setupGeneratorEditor({getProject:()=>project,getSelection:()=>[...selectedBodies],commit,canOpen:()=>!busy&&!sketch&&!transformStart&&!drag&&!inspectorDirty,toast,getError:()=>lastCommitError});
+$('#open-generator').onclick=()=>openGenerator();
 $('#add-box').onclick=()=>addBody('box');$('#add-cylinder').onclick=()=>addBody('cylinder');
 $('#shape-library').innerHTML=Object.entries(SHAPES).filter(([kind])=>!['box','cylinder'].includes(kind)).map(([kind,s])=>`<button data-add-shape="${kind}" title="${s.name}" aria-label="${s.name}"><img src="./shapes/${kind}.png" alt="" width="128" height="96" draggable="false">${s.name}</button>`).join('');
 $('#plane-sketch').onclick=()=>startPlaneSketch();
@@ -714,6 +866,8 @@ document.addEventListener('keydown',event=>{
  if(editing||document.querySelector('dialog[open]'))return;
  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'){event.preventDefault();event.shiftKey?redo():undo();return;}
  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='y'){event.preventDefault();redo();return;}
+ if((event.ctrlKey||event.metaKey)&&!sketch&&['c','x','v'].includes(event.key.toLowerCase())){event.preventDefault();event.key.toLowerCase()==='v'?pasteClipboard():copyBodies(event.key.toLowerCase()==='x');return;}
+ if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='a'&&!sketch){event.preventDefault();selectedBodies=new Set(project.objects.filter(o=>o.visible!==false).map(o=>o.id));selectedId=[...selectedBodies][0]??null;selectedFace=null;renderBodies();renderPanels();return;}
  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='d'){event.preventDefault();duplicateSelected();return;}
  if(event.key.toLowerCase()==='f')fitView();
  if(event.key.toLowerCase()==='v')setTool('select');
@@ -760,7 +914,7 @@ setupSession({
  list:()=>library.list(),
  state:()=>{if(!sessionReady)throw new Error('Anwendung noch nicht bereit.');return sessionState();},
  async action(method,args){
-  if(!sessionReady||busy||sketch||drag||inspectorDirty||document.activeElement?.matches('#inspector input, #inspector select, #project-name'))throw new Error('Browser ist beschäftigt oder Eingaben sind noch nicht übernommen. Bitte den aktuellen Schritt zuerst übernehmen oder abbrechen.');
+  if(!sessionReady||busy||sketch||drag||transformStart||inspectorDirty||document.querySelector('#generator-dialog[open],#region-dialog[open]')||document.activeElement?.matches('#inspector input, #inspector select, #project-name'))throw new Error('Browser ist beschäftigt oder Eingaben sind noch nicht übernommen. Bitte den aktuellen Schritt zuerst übernehmen oder abbrechen.');
   if(args.projectId!==activeProjectId||args.revision!==projectRevision)throw new Error('Projekt oder Revision hat sich geändert. Erst formraum_get_project erneut lesen.');
   const stored=library.read(activeProjectId);
   if(!stored||stored.revision!==projectRevision)throw new Error('Projekt wurde in einem anderen Tab geändert. Bitte zuerst im Browser neu öffnen.');
@@ -778,10 +932,147 @@ setupSession({
  view(){renderer.render(scene,camera);return renderer.domElement.toDataURL('image/png').split(',')[1];},
 });
 
+function resetTransformGroups(){for(const group of groups.values()){group.matrixAutoUpdate=true;group.position.set(0,0,0);group.quaternion.identity();group.scale.set(1,1,1);group.updateMatrix();}}
+function cancelTransform(){transformStart=null;transformControl.dragging=false;transformControl.detach();controls.enabled=true;resetTransformGroups();}
+function selectionCenter(){const b=new THREE.Box3();for(const id of selectedBodies){const m=models.find(m=>m.id===id);if(m){b.expandByPoint(vec(m.bounds.min));b.expandByPoint(vec(m.bounds.max));}}return b.isEmpty()?new THREE.Vector3():b.getCenter(new THREE.Vector3());}
+function syncTransformHandle(){
+ if(transformStart)return;
+ transformControl.detach();
+ if(busy||sketch||!['rotate','scale'].includes(tool)||!selectedBodies.size||selectedSpecs().some(o=>o.locked||o.visible===false))return;
+ transformProxy.position.copy(selectionCenter());transformProxy.quaternion.identity();transformProxy.scale.set(1,1,1);transformProxy.updateMatrixWorld();
+ transformControl.setMode(tool);transformControl.attach(transformProxy);
+}
+function renderTransformInspector(){
+ const rotate=tool==='rotate',blocked=!selectedBodies.size||selectedSpecs().some(o=>o.locked);
+ $('#inspector').innerHTML=`<div class="inspector-heading">AUSWAHL ${rotate?'DREHEN':'SKALIEREN'}</div><div class="inspector-content"><p class="tool-description">${selectedBodies.size} Körper ausgewählt. ${rotate?'Die farbigen Ringe am Modell ziehen.':'Einen Griff am Modell ziehen. Alle Richtungen werden gleichmäßig skaliert.'} Mittelpunkt ist die gemeinsame Auswahl.</p>${blocked?'<p class="tip">Mindestens einen ungesperrten Körper auswählen.</p>':''}${rotate?axisSelect('data-transform-axis','z')+field('Drehwinkel','transform-angle',90,'°'):field('Skalierungsfaktor','transform-scale',2,'×')}<button class="primary" data-action="apply-transform" ${blocked?'disabled':''}>${rotate?'Drehung':'Skalierung'} anwenden</button><label class="field"><span>${rotate?'Winkelraster · °':'Skalierungsraster · Faktor'}</span><input type="number" data-transform-snap min="0" step="any" value="${rotate?THREE.MathUtils.radToDeg(transformControl.rotationSnap??0):transformControl.scaleSnap??0}"></label><p class="tip">0 bewegt frei. Loslassen übernimmt die Änderung. Esc verwirft eine laufende Bewegung.</p><p id="transform-delta" role="status"></p><button class="subtle-button" data-action="cancel-tool">Zurück</button></div>`;
+}
+async function applyNumericTransform(){
+ if(busy||sketch||!selectedBodies.size)return;
+ try{
+  const scale=tool==='scale'?inputNumber('transform-scale'):1,q=new THREE.Quaternion();
+  if(tool==='rotate')q.setFromAxisAngle(vec(({x:[1,0,0],y:[0,1,0],z:[0,0,1]})[$('[data-transform-axis]').value]),inputNumber('transform-angle')*Math.PI/180);
+  const ids=[...selectedBodies],next=transformedBodies(project,ids,selectionCenter().toArray(),q.toArray(),scale);
+  if(await commit(next,{message:tool==='rotate'?'Auswahl gedreht':'Auswahl skaliert'})){selectedBodies=new Set(ids);renderBodies();renderPanels();}
+ }catch(error){toast(error.message,true);}
+}
+function cancelMarquee(){if(drag?.kind==='marquee')drag=null;marquee.hidden=true;}
+function finishMarquee(event){
+ const selection=drag,[x,y]=selection.start;cancelMarquee();
+ if(Math.hypot(event.clientX-x,event.clientY-y)<5){if(!selection.additive)selectObject(null);return;}
+ const rect=renderer.domElement.getBoundingClientRect(),min=[Math.min(x,event.clientX),Math.min(y,event.clientY)],max=[Math.max(x,event.clientX),Math.max(y,event.clientY)];
+ const ids=selection.additive?new Set(selectedBodies):new Set();camera.updateMatrixWorld();
+ for(const m of models){
+  if(project.objects.find(o=>o.id===m.id)?.visible===false)continue;
+  const corners=[];for(let i=0;i<8;i++)corners.push(vec([0,1,2].map(j=>m.bounds[i&(1<<j)?'max':'min'][j])).project(camera));
+  if(corners.every(p=>{const px=rect.x+(p.x+1)*rect.width/2,py=rect.y+(1-p.y)*rect.height/2;return p.z>=-1&&p.z<=1&&px>=min[0]&&px<=max[0]&&py>=min[1]&&py<=max[1];}))ids.add(m.id);
+ }
+ selectedBodies=ids;selectedId=ids.has(selectedId)?selectedId:[...ids][0]??null;selectedFace=null;selectedFeature=-1;renderBodies();renderPanels();
+}
+async function copyBodies(cut=false){
+ if(busy||sketch||!selectedBodies.size)return;
+ try{
+  if(cut&&selectedSpecs().some(o=>o.locked))throw new Error('Gesperrte Körper zuerst entsperren.');
+  sessionStorage.setItem('formraum.body-clipboard',JSON.stringify({version:1,objects:clone(selectedSpecs()),sketches:referencedSketches(project,selectedSpecs())}));
+  if(cut){const next=clone(project);next.objects=next.objects.filter(o=>!selectedBodies.has(o.id));await commit(next,{message:'Auswahl ausgeschnitten · Strg V zum Einfügen'});}
+  else toast('In Formraum kopiert · Strg V zum Einfügen');
+ }catch(error){toast(error.message,true);}
+}
+async function pasteClipboard(){
+ if(busy||sketch)return;
+ try{
+  const data=JSON.parse(sessionStorage.getItem('formraum.body-clipboard')||'null');if(data?.version!==1)throw new Error('Die Formraum-Zwischenablage ist leer.');
+  const {project:next,ids}=pasteBodies(project,data.objects,5,uid,data.sketches??[]),previous=selectedId;selectedId=ids[0];
+  if(await commit(next,{fit:true,message:'Körper eingefügt'})){selectedBodies=new Set(ids);setTool('select');renderBodies();renderPanels();}else selectedId=previous;
+ }catch(error){toast(error.message,true);}
+}
+async function changeHistory(action,direction=0){
+ if(busy||sketch||!currentSpec())return;
+ const next=clone(project),spec=next.objects.find(o=>o.id===selectedId),index=selectedFeature;
+ if(action==='resume')delete spec.rollback;
+ else if(index<0||!spec.features[index])return;
+ else if(action==='suppress')spec.features[index].suppressed=!spec.features[index].suppressed;
+ else if(action==='rollback')spec.rollback=index+1;
+ else if(action==='reorder'){
+  const to=index+direction;if(to<0||to>=spec.features.length)return;
+  [spec.features[index],spec.features[to]]=[spec.features[to],spec.features[index]];delete spec.rollback;
+ }
+ await commit(next,{message:'Modellverlauf aktualisiert'});
+}
+function clearSection(){
+ if(!sectionActive)return;sectionActive=false;disposeGroup(previewRoot);bodyRoot.visible=true;overlayRoot.visible=true;
+}
+function renderSectionInspector(){
+ $('#inspector').innerHTML=`<div class="inspector-heading">SCHNITTANSICHT</div><div class="inspector-content"><p class="tool-description">Geschlossener CAD-Schnitt zur Kontrolle des Innenraums. Das Modell und die Exportdateien behalten ihre vollständige Geometrie.</p>${axisSelect('data-section-axis',sectionSettings.axis)}${field('Schnittposition','section-offset',sectionSettings.offset)}<label class="locked-dimension"><input type="checkbox" id="section-flip" ${sectionSettings.flip?'checked':''}> Andere Hälfte zeigen</label><button class="primary" data-action="apply-section">Schnitt anzeigen</button><button class="subtle-button" data-action="cancel-tool">Schnitt beenden</button><p id="section-status" role="status">${sectionActive?'Schnittansicht aktiv · Drehen und Zoomen möglich':'Achse und Position wählen.'}</p></div>`;
+}
+async function applySection(){
+ if(busy||sketch)return;let settings;
+ try{settings={axis:$('[data-section-axis]').value,offset:inputNumber('section-offset'),flip:$('#section-flip').checked};}catch(error){toast(error.message,true);return;}
+ setBusy(true);
+ try{
+  const result=await calculate('section',{project:clone(project),...settings});clearSection();disposeGroup(previewRoot);
+  for(const model of result.objects){
+   const spec=project.objects.find(o=>o.id===model.id),geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(model.mesh.vertices.flat(),3));geometry.setIndex(model.mesh.triangles.flat());geometry.computeVertexNormals();
+   previewRoot.add(new THREE.Mesh(geometry,new THREE.MeshStandardMaterial({color:spec.color??'#67aba9',roughness:.55,side:THREE.DoubleSide,polygonOffset:true,polygonOffsetFactor:1,polygonOffsetUnits:1})));
+   for(const edge of model.edges)previewRoot.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(edge.points.map(vec)),new THREE.LineBasicMaterial({color:0x355d65})));
+  }
+  Object.assign(sectionSettings,settings);sectionActive=true;bodyRoot.visible=false;overlayRoot.visible=false;
+  $('#section-status').textContent=result.objects.length?'Schnittansicht aktiv · Drehen und Zoomen möglich':'Auf dieser Seite der Ebene liegt kein Körper.';
+  $('#section-status').dataset.volume=String(result.objects.reduce((sum,o)=>sum+o.volume,0));
+ }catch(error){toast(error.message,true);}finally{setBusy(false);}
+}
+function cancelMovePreview(){
+ if(drag?.kind!=='move')return;
+ for(const item of drag.positions)groups.get(item.id)?.position.set(0,0,0);drag=null;
+ const label=$('#move-delta');if(label)label.textContent='Verschiebung abgebrochen.';
+}
+function renderMoveInspector(){
+ $('#inspector').innerHTML=`<div class="inspector-heading">AUSWAHL VERSCHIEBEN${icon('move')}</div><div class="inspector-content"><p class="tool-description">${selectedBodies.size} Körper ausgewählt. Einen ausgewählten Körper ziehen, um alle gemeinsam zu verschieben.</p><label class="field"><span>Verschiebeebene</span><select data-move-plane>${['xy','xz','yz'].map(p=>`<option value="${p}" ${moveSettings.plane===p?'selected':''}>${p.toUpperCase()}</option>`).join('')}</select></label><label class="field"><span>Richtung</span><select data-move-axis><option value="free" ${moveSettings.axis==='free'?'selected':''}>Frei in der Ebene</option>${[...moveSettings.plane].map(a=>`<option value="${a}" ${moveSettings.axis===a?'selected':''}>Nur ${a.toUpperCase()}</option>`).join('')}</select></label><label class="field"><span>Verschieberaster · mm</span><input type="number" data-move-snap value="${moveSettings.snap}" min="0" max="10000" step="any"></label><p class="tip">0 oder gedrückte Alt-Taste bewegt frei. Esc verwirft die laufende Bewegung. Zum Verschieben in Z die Ebene XZ oder YZ wählen.</p><p id="move-delta" role="status">Körper im 3D-Bereich ziehen.</p><button class="subtle-button" data-action="cancel-tool">Zurück</button></div>`;
+}
+function axisSelect(attribute,value='z'){
+ return `<label class="field"><span>Achse / Ebenennormale</span><select ${attribute}>${['x','y','z'].map(a=>`<option value="${a}" ${a===value?'selected':''}>${a.toUpperCase()}${attribute==='data-mirror-axis'?' · '+({x:'YZ',y:'XZ',z:'XY'})[a]+'-Ebene':''}</option>`).join('')}</select></label>`;
+}
+function renderPatternInspector(){
+ const sources=selectedSpecs(),bounds=new THREE.Box3();
+ for(const source of sources){const model=models.find(m=>m.id===source.id);if(model){bounds.expandByPoint(vec(model.bounds.min));bounds.expandByPoint(vec(model.bounds.max));}}
+ const step=bounds.isEmpty()?20:bounds.max.x-bounds.min.x+5,offset=bounds.isEmpty()?0:bounds.max.x+5;
+ const modeOptions=[['linear','Lineare Kopien'],['circular','Kreiskopien'],['mirror','Spiegeln']];
+ $('#inspector').innerHTML=`<div class="inspector-heading">KOPIEREN & SPIEGELN${icon('pattern')}</div><div class="inspector-content"><p class="tool-description">${sources.length} Körper ausgewählt. Mehrere Körper über die Häkchen auswählen.</p><label class="field"><span>Werkzeug</span><select data-pattern-mode>${modeOptions.map(([mode,label])=>`<option value="${mode}" ${mode===patternMode?'selected':''}>${label}</option>`).join('')}</select></label>${patternMode==='mirror'?`${axisSelect('data-pattern-axis','x')}${field('Position der Spiegelebene','pattern-offset',offset)}<label class="locked-dimension"><input type="checkbox" id="pattern-keep-original" checked> Original behalten</label><p class="tip">Beispiel: Achse X und Position 0 spiegeln an der YZ-Ebene. Position in Weltkoordinaten.</p>`:`${field('Anzahl einschließlich Original','pattern-count',patternMode==='linear'?3:4,'','min="2" max="30" step="1"')}${patternMode==='linear'?`<div class="section-title">ABSTAND PRO KOPIE</div><div class="fields-3">${['x','y','z'].map(a=>field(a.toUpperCase(),'pattern-step-'+a,a==='x'?step:0)).join('')}</div><p class="tip">Die Abstände addieren sich pro Kopie. Negative Werte kehren die Richtung um.</p>`:`${axisSelect('data-pattern-axis','z')}<div class="section-title">DREHZENTRUM</div><div class="fields-3">${['x','y','z'].map(a=>field(a.toUpperCase(),'pattern-center-'+a,0)).join('')}</div>${field('Gesamtwinkel','pattern-angle',360,'°')}<label class="locked-dimension"><input type="checkbox" id="pattern-rotate" checked> Körper mitdrehen</label><p class="tip">360° verteilt gleichmäßig ohne doppelte Endkopie. Bei Teilkreisen liegen Original und letzte Kopie an den Winkelgrenzen.</p>`}`}<button class="primary" data-action="apply-pattern" ${sources.length?'':'disabled'}>${patternMode==='mirror'?'Spiegelung übernehmen':'Kopien erstellen'}</button><button class="subtle-button" data-action="cancel-tool">Zurück</button><p class="tip">Kopien bleiben einzeln bearbeitbar und sind unabhängig vom Original. Ein Schritt lässt sich mit Strg Z rückgängig machen. Maximal 30 Körper pro Projekt.</p></div>`;
+}
+async function applyBodyPattern(){
+ if(busy||sketch||!selectedSpecs().length)return;
+ try{
+  const options={mode:patternMode};
+  if(patternMode==='mirror'){options.axis=$('[data-pattern-axis]').value;options.offset=inputNumber('pattern-offset');options.keepOriginal=$('#pattern-keep-original').checked;}
+  else{
+   options.count=inputNumber('pattern-count');
+   if(patternMode==='linear')options.step=['x','y','z'].map(a=>inputNumber('pattern-step-'+a));
+   else{options.axis=$('[data-pattern-axis]').value;options.center=['x','y','z'].map(a=>inputNumber('pattern-center-'+a));options.angle=inputNumber('pattern-angle');options.rotate=$('#pattern-rotate').checked;}
+  }
+  const result=createBodyPattern(project,selectedSpecs().map(o=>o.id),options);
+  if(await commit(result.project,{fit:true,message:patternMode==='mirror'?'Spiegelung erstellt':'Kopien erstellt'})){
+   tool='select';selectedId=result.ids[0];selectedBodies=new Set(result.ids);renderBodies();renderPanels();
+  }
+ }catch(error){toast(error.message,true);}
+}
+function measurementKey(){return JSON.stringify([activeProjectId,projectRevision,[...selectedBodies].sort()]);}
+function renderMeasureInspector(){
+ const selected=selectedSpecs(),result=measurementResult?.key===measurementKey()?measurementResult:null;
+ $('#inspector').innerHTML=`<div class="inspector-heading">MESSEN${icon('measure')}</div><div class="inspector-content"><p class="tool-description">Ein Körper zeigt Außenmaße, Oberfläche und Volumen. Für den kleinsten Abstand zwei Körper anklicken oder über die Häkchen auswählen.</p>${selected.map(spec=>{const model=models.find(m=>m.id===spec.id);if(!model)return '';return `<section class="measurement-card"><h3>${esc(spec.name)}</h3><dl>${['x','y','z'].map((a,i)=>`<div><dt>Außenmaß ${a.toUpperCase()}</dt><dd>${fmt(model.bounds.max[i]-model.bounds.min[i],3)} mm</dd></div>`).join('')}<div><dt>Oberfläche</dt><dd>${fmt(model.faces.reduce((sum,f)=>sum+f.area,0),3)} mm²</dd></div><div><dt>Volumen</dt><dd>${fmt(model.volume,3)} mm³</dd></div><div><dt>Schwerpunkt X / Y / Z</dt><dd>${model.centerOfMass.map(n=>fmt(n,3)).join(" / ")} mm</dd></div>${spec.density>0?`<div><dt>Masse</dt><dd>${fmt(model.volume*spec.density/1000,3)} g</dd></div>`:""}</dl></section>`;}).join('')}${selected.length===2?`<button class="primary" data-action="measure-distance">Kleinsten Abstand berechnen</button>`:`<p class="tip">${selected.length>2?'Bitte genau zwei Körper für die Abstandsmessung auswählen.':'Der Abstand wird zwischen den CAD-Körpern gemessen.'}</p>`}${result?`<div class="measurement-result" role="status" data-measure-distance="${result.distance}"><span>Kleinster Körperabstand</span><strong>${fmt(result.distance,4)} mm</strong><span data-intersection-volume="${result.intersectionVolume}">Überschneidung: ${fmt(result.intersectionVolume,3)} mm³</span></div><p class="tip">0 mm bedeutet Berührung oder Überlappung. Dies ist keine Messung der Überdeckungstiefe.</p>`:''}<button class="subtle-button" data-action="cancel-tool">Zurück</button></div>`;
+}
+async function measureSelectedBodies(){
+ if(busy||sketch||selectedBodies.size!==2)return;
+ const [first,second]=selectedSpecs().map(o=>o.id),key=measurementKey();setBusy(true);
+ try{const result=await calculate('measure',{project:clone(project),first,second});measurementResult={key,...result};if(tool==='measure')renderMeasureInspector();}
+ catch(error){toast(error.message,true);}
+ finally{setBusy(false);}
+}
+
 function bodyParameterFields(spec){
- if(SHAPES[spec.kind])return '<div class="section-title">MASSE DES GRUNDKÖRPERS</div>'+SHAPES[spec.kind].fields.map(([key,label])=>field(label,key,spec.params[key]??SHAPES[spec.kind].params[key],['sides','teeth'].includes(key)?'':'mm')).join('');
- if(spec.kind==='boolean')return `<div class="section-title">AUSGANGSFORMEN · ${esc(({union:'Vereint',cut:'Ausgeschnitten',intersect:'Schnittmenge',hull:'Konvexe Hülle'})[spec.operation])}</div>`+spec.operands.map((o,i)=>`<details class="operand-editor"><summary>${esc(o.name||shapeName(o.kind))}</summary>${(SHAPES[o.kind]?.fields||[]).map(([key,label])=>field(label,'operand-'+i+'-'+key,o.params?.[key]??SHAPES[o.kind].params[key],['sides','teeth'].includes(key)?'':'mm')).join('')}<div class="fields-3">${['x','y','z'].map((axis,n)=>field(axis.toUpperCase(),'operand-'+i+'-'+axis,o.position?.[n]||0)).join('')}</div></details>`).join('');
- if(spec.kind==='profile'){const profiles=[spec.profile,...(spec.contours??[])],s=profiles[Math.min(selectedContour,profiles.length-1)];return `${profileSelector(profiles)}${spec.contours?field('Mitte U','profile-u',s.center?.[0]??0)+field('Mitte V','profile-v',s.center?.[1]??0):''}<div class="section-title">SKIZZE · ${esc(sketchName(s.kind))}</div>${isRadial(s.kind)?field('Radius','profile-radius',s.radius):field('Breite','profile-width',s.width)+field('Höhe','profile-height',s.height)}${s.kind==='polygon'?field('Seiten','profile-sides',s.sides,''):''}${field('Winkel','profile-angle',s.angle||0,'°')}${field('Aufbauhöhe','height',spec.params.height)}`;}
+ if(spec.kind==='region')return `<button class="primary" data-open-region-sketch="${esc(spec.sketchId)}" data-region-body="${esc(spec.id)}">Freie Skizze und Flächenauswahl bearbeiten</button><p class="tip">${spec.regions.length} gewählte Bereiche · ${fmt(spec.params.revolveAngle)}° Rotation. Linien, Kreise und Drehachse bleiben bearbeitbar.</p>`;
+ if(spec.kind==='mirror')return `<div class="section-title">SPIEGELUNG</div>${axisSelect('data-mirror-axis',spec.axis)}${field('Position der Spiegelebene','mirror-offset',spec.offset)}<p class="tip">Unabhängige Spiegelkopie von ${esc(spec.source.name||'Körper')}. Die Ebene bezieht sich auf die gespeicherte Ausgangsgeometrie.</p>${(SHAPES[spec.source.kind]?.fields||[]).map(([key,label])=>parameterField(spec.source,'Quelle · '+label,key,'mirror-source-'+key)).join('')}`;
+ if(SHAPES[spec.kind])return '<div class="section-title">MASSE DES GRUNDKÖRPERS</div>'+SHAPES[spec.kind].fields.map(([key,label])=>parameterField(spec,label,key,key)).join('');
+ if(spec.kind==='boolean')return `<div class="section-title">AUSGANGSFORMEN · ${esc(({union:'Vereint',cut:'Ausgeschnitten',intersect:'Schnittmenge',hull:'Konvexe Hülle'})[spec.operation])}</div>`+spec.operands.map((o,i)=>`<details class="operand-editor"><summary>${esc(o.name||shapeName(o.kind))}</summary>${(SHAPES[o.kind]?.fields||[]).map(([key,label])=>parameterField(o,label,key,'operand-'+i+'-'+key)).join('')}<div class="fields-3">${['x','y','z'].map((axis,n)=>field(axis.toUpperCase(),'operand-'+i+'-'+axis,o.position?.[n]||0)).join('')}</div></details>`).join('');
+ if(spec.kind==='profile'){const profiles=[spec.profile,...(spec.contours??[])],s=profiles[Math.min(selectedContour,profiles.length-1)];return `${profileSelector(profiles)}${spec.contours?field('Mitte U','profile-u',s.center?.[0]??0)+field('Mitte V','profile-v',s.center?.[1]??0):''}<div class="section-title">SKIZZE · ${esc(sketchName(s.kind))}</div>${s.kind==='polyline'?vertexEditor(s,'profile'):isRadial(s.kind)?field('Radius','profile-radius',s.radius):field('Breite','profile-width',s.width)+field('Höhe','profile-height',s.height)}${s.kind==='polygon'?field('Seiten','profile-sides',s.sides,''):''}${field('Winkel','profile-angle',s.angle||0,'°')}${profileOperationFields({...spec.params,loft:spec.params,sweepPath:spec.sweepPath,operation:spec.operation??'extrude'},'body')}${field('Aufbauhöhe','height',spec.params.height)}`;}
  return '<p class="tip">Die Grundform des Imports bleibt erhalten. Skizzen und Kantenbearbeitungen kannst du ergänzen.</p>';
 }
 function selectedSpecs(){return [currentSpec(),...project.objects.filter(o=>o.id!==selectedId&&selectedBodies.has(o.id))].filter(Boolean);}
@@ -803,8 +1094,8 @@ async function combineSelected(mode){
 }
 async function duplicateSelected(){
  if(busy||sketch||!selectedId)return;
- const next=clone(project),copies=selectedSpecs().map(o=>({...clone(o),id:uid(),name:o.name+' Kopie',position:(o.position||[0,0,0]).map((v,i)=>v+(i===0?5:0))}));
- next.objects.push(...copies);const previous=selectedId;selectedId=copies[0].id;if(!await commit(next,{fit:true,message:'Auswahl dupliziert'}))selectedId=previous;
+ const next=clone(project),copies=selectedSpecs().map(o=>({...clone(o),id:uid(),locked:false,name:o.name+' Kopie',position:(o.position||[0,0,0]).map((v,i)=>v+(i===0?5:0))}));
+ copies.forEach(o=>delete o.generated);next.objects.push(...copies);const previous=selectedId;selectedId=copies[0].id;if(!await commit(next,{fit:true,message:'Auswahl dupliziert'}))selectedId=previous;
 }
 async function groundSelected(){
  if(busy||sketch)return;const next=clone(project);
@@ -885,15 +1176,51 @@ function drawPlacementDimensions(){
  }
 }
 
-const contourKeys=['kind','center','width','height','radius','sides','angle','hasDrawn','locks','invalid','constraints','distanceReference','role'];
-function captureContour(){return Object.fromEntries(contourKeys.map(key=>[key,clone(sketch[key])]));}
+const contourKeys=['kind','center','width','height','radius','sides','angle','hasDrawn','locks','invalid','constraints','distanceReference','role','vertices','closed'];
+function captureContour(){return Object.fromEntries(contourKeys.map(key=>[key,clone(sketch[key]??(key==='vertices'?[]:key==='closed'?false:null))]));}
+function profileOperationFields(s,scope){
+ const input=scope==='sketch'?skField:field,options=[['extrude','Gerade aufbauen'],['revolve','Um die V-Achse rotieren'],['loft','Loft · zwei Querschnitte'],['sweep','Sweep · entlang eines Pfads']];
+ const group=(mode,html)=>`<div data-operation-options="${mode}" ${s.operation!==mode?'hidden':''}>${html}</div>`;
+ const rotation=input('Rotationswinkel','revolveAngle',s.revolveAngle??360,'°')+input('Drehachse · U-Position','axisOffset',s.axisOffset??0)+'<p class="tip">Die Drehachse verläuft parallel zu V in der Skizzenebene. Die Kontur muss vollständig auf einer Seite der Achse liegen.</p>';
+ const loft=Object.entries({topScale:'Endmaß-Faktor',topAngle:'Endwinkel',topU:'Endversatz U',topV:'Endversatz V'}).map(([key,label])=>input(label,key,s.loft?.[key]??loftDefaults[key],key==='topScale'?'×':key==='topAngle'?'°':'mm')).join('')+'<p class="tip">Zwei Querschnitte derselben Kontur. Endmaß und Drehung beziehen sich auf den Skizzenursprung; die Aufbauhöhe bestimmt den Abstand der Ebenen.</p>';
+ return `<label class="field"><span>Körper erzeugen</span><select data-profile-operation aria-label="Körper erzeugen">${options.map(([key,label])=>`<option value="${key}" ${s.operation===key?'selected':''}>${label}</option>`).join('')}</select></label>${group('revolve',rotation)}${group('loft',loft)}${group('sweep',sweepEditor(s.sweepPath??defaultSweepPath(),scope))}`;
+}
+function sweepEditor(points,scope){
+ return `<div class="section-title">SWEEP-PFAD · U / HÖHE</div><div class="vertex-editor">${points.map((p,i)=>`<div class="vertex-row"><span>${i+1}</span>${['x','y'].map((axis,j)=>`<label><span>${j?'H':'U'}</span><input type="number" required min="-10000" max="10000" step="any" aria-label="Pfadpunkt ${i+1} ${j?'Höhe':'U'}" data-sweep-point="${i}" data-axis="${axis}" value="${p[axis]}"></label>`).join('')}${scope==='sketch'&&points.length>2?`<button data-remove-sweep-point="${i}" aria-label="Pfadpunkt ${i+1} entfernen">×</button>`:''}</div>`).join('')}</div>${scope==='sketch'?'<button class="subtle-button" data-action="add-sweep-point">Pfadpunkt hinzufügen</button>':''}<p class="tip">Pfad in der U-Höhen-Ebene. Start bei 0 / 0, erster Abschnitt senkrecht nach oben. Enge Knicke oder Selbstüberschneidungen können ungültige Körper erzeugen. Die 3D-Vorschau zeigt das Ergebnis.</p>`;
+}
+function readSweepPath(){
+ const points=[];for(const el of $$('[data-sweep-point]')){if(!el.checkValidity())throw new Error('Bitte gültige Pfadkoordinaten eingeben.');const i=Number(el.dataset.sweepPoint);points[i]??={id:'p'+i};points[i][el.dataset.axis]=Number(el.value);}
+ return validateSweepPath(points);
+}
+function vertexEditor(p,scope,scale=1){
+ return `<div class="section-title">PUNKTE · ${(p.vertices??[]).length}/128</div><div class="vertex-editor">${(p.vertices??[]).map((v,i)=>`<div class="vertex-row"><span>${i+1}</span>${['x','y'].map((axis,j)=>`<label><span>${j?'V':'U'}</span><input type="number" step="any" min="-10000" max="10000" required aria-label="Punkt ${i+1} ${j?'V':'U'}" data-vertex-scope="${scope}" data-vertex-index="${i}" data-vertex-axis="${axis}" value="${v[axis]*scale}"></label>`).join('')}${scope==='sketch'?`<button data-remove-vertex="${i}" aria-label="Punkt ${i+1} entfernen">×</button>`:''}</div>`).join('')}</div>${scope==='sketch'?`<button class="subtle-button" data-action="${p.closed?'reopen-polyline':'close-polyline'}" ${!p.closed&&(p.vertices??[]).length<3?'disabled':''}>${p.closed?'Linienzug wieder öffnen':'Kontur schließen'}</button><p class="tip">Punkte einzeln anklicken. Startpunkt anklicken schließt die Kontur. Geschlossene Kontur: Punkte mit der Maus verschieben. Koordinaten beziehen sich auf den Konturmittelpunkt und -winkel.</p>`:''}`;
+}
+function readVertices(p,scope,scale=1){
+ const vertices=p.vertices.map((v,i)=>({...v,...Object.fromEntries(['x','y'].map(axis=>{const el=$(`[data-vertex-scope="${scope}"][data-vertex-index="${i}"][data-vertex-axis="${axis}"]`);if(!el?.checkValidity())throw new Error('Bitte gültige Punktkoordinaten eingeben.');return [axis,Number(el.value)/scale];}))}));
+ return validateVertices(vertices);
+}
+function localSketchPoint([u,v]){const a=-sketch.angle*Math.PI/180,x=u-sketch.center[0],y=v-sketch.center[1];return [x*Math.cos(a)-y*Math.sin(a),x*Math.sin(a)+y*Math.cos(a)];}
+function closePolyline(){
+ if(!sketch||busy)return;
+ try{validateVertices(sketch.vertices);if(sketch.invalid.vertices)throw new Error('Bitte gültige Punktkoordinaten eingeben.');sketch.closed=true;sketch.hasDrawn=true;renderSketchInspector();drawSketch();}
+ catch(error){toast(error.message,true);}
+}
+function handlePolylinePointer(event){
+ const hit=sketchPoint(event);if(!hit)return;sketch.vertices??=[];
+ const [x,y]=localSketchPoint(hit),tolerance=viewHeight/camera.zoom/viewport.clientHeight*10;
+ const near=sketch.vertices.findIndex(v=>Math.hypot(x-v.x,y-v.y)<tolerance);
+ if(sketch.closed){if(near>=0){drag={kind:'vertex',index:near};renderer.domElement.setPointerCapture(event.pointerId);}return;}
+ if(near===0&&sketch.vertices.length>=3){closePolyline();return;}
+ if(sketch.vertices.length>=128){toast('Maximal 128 Punkte pro Linienzug.',true);return;}
+ sketch.vertices.push({id:uid(),x,y});sketch.invalid.vertices=false;renderSketchInspector();drawSketch();
+}
 function saveContour(){sketch.profiles[sketch.activeContour]=captureContour();}
 function switchContour(index){
  if(!sketch||busy)return;saveContour();sketch.activeContour=index;Object.assign(sketch,clone(sketch.profiles[index]));renderSketchInspector();drawSketch();updateToolButtons();
 }
 function addContour(duplicate){
  if(!sketch||busy)return;saveContour();if(sketch.profiles.length>=12){toast('Maximal zwölf Konturen pro Skizze.');return;}
- const profile=duplicate?captureContour():{kind:'circle',center:[0,0],width:10,height:10,radius:3,sides:6,angle:0,hasDrawn:false,locks:{},invalid:{},constraints:{},distanceReference:'outline',role:'solid'};
+ const profile=duplicate?captureContour():{kind:'circle',center:[0,0],width:10,height:10,radius:3,sides:6,angle:0,hasDrawn:false,locks:{},invalid:{},constraints:{},distanceReference:'outline',role:'solid',vertices:[],closed:false};
  if(duplicate){profile.center[0]+=10;profile.constraints={};profile.invalid={};}
  sketch.profiles.push(profile);switchContour(sketch.profiles.length-1);
 }
@@ -905,6 +1232,7 @@ function contourList(){
 }
 function contourPoints(p){
  const a=p.angle*Math.PI/180,c=Math.cos(a),s=Math.sin(a),point=(x,y)=>toSketchWorld(p.center[0]+x*c-y*s,p.center[1]+x*s+y*c);
+ if(p.kind==='polyline'||p.kind==='slot')return profilePoints(p).map(([x,y])=>point(x,y));
  if(p.kind==='rectangle')return [[-p.width/2,-p.height/2],[p.width/2,-p.height/2],[p.width/2,p.height/2],[-p.width/2,p.height/2]].map(([x,y])=>point(x,y));
  const count=p.kind==='polygon'?p.sides:96;return Array.from({length:count},(_,i)=>{const a=2*Math.PI*i/count+(p.kind==='polygon'?Math.PI/2:0);return point(Math.cos(a)*(p.kind==='ellipse'?p.width/2:p.radius),Math.sin(a)*(p.kind==='ellipse'?p.height/2:p.radius));});
 }
