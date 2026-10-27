@@ -2,7 +2,24 @@
 
 Priorität des Nutzers vom 26. Oktober 2026: präzise Einzelteilkonstruktion und direkte Bedienung gemeinsam ausbauen. Formraum soll weiterhin im Browser laufen und Modelldaten auf dem eigenen Rechner halten. Diese Liste ist ein Entwicklungsplan; sie behauptet keine vollständige Funktionsgleichheit mit Tinkercad oder Onshape.
 
-## Bestandsaufnahme
+## Ausbau vom 27. Oktober 2026: Skizzen, Parameter, Muster und Gelenke
+
+Aktueller Stand (ersetzt die offenen Punkte der historischen Bestandsaufnahme unten):
+
+- Freie Linien/Kreise/Bögen, analytische Flächenerkennung, Trimmen und Versatz für Kreise/Bögen und geschlossene Linienzüge; Hilfsgeometrie.
+- Numerische Beziehungen: Koinzidenz, horizontal/vertikal, parallel, rechtwinklig, tangential, gleich, Mittelpunkt, Symmetrie, Länge/Abstand/Radius/Winkel und Fixpunkte. Formelmaße, Freiheitsgrade, Redundanzanzeige und Konfliktprüfung. Zusammengezeichnete Endpunkte werden verknüpft. 128 Beziehungen / 256 beteiligte Solver-Koordinaten.
+- XY/XZ/YZ-Ebenen mit Ursprung und freier Drehung; Skizzen auf ausgewählten ebenen Körperflächen. Eine Flächenauswahl für Aufbau und Rotation, jeweils neu/additiv/subtraktiv. Bestehende Kontur-Skizzen bleiben zusätzlich verfügbar; keine verlustbehaftete automatische Migration.
+- Maßbindungen für numerische Körper-, Kontur-, Punkt- und Featurewerte sowie freie Skizzen und Arbeitsebenen. Stabile Konturzuordnung erhält Flächenauswahl bei Maßänderungen; Topologieänderungen können Neuauswahl erfordern.
+- Assoziative lineare, kreisförmige und Linienpfadmuster für Aufbau/Ausschnitt/freie Skizzenfeatures. Generator-Pfadmuster wiederholen Children. Kein beliebiges Flächen-, Rundungs- oder Fasenmuster; Pfade sind Linienzüge mit konstanter Orientierung der Instanzen.
+- Baugruppen als Baum mit festen Verbindungen, Schiebe- und Drehgelenken, lokalen Achsen, Formelgrenzen, Animation/Vorschau und persistenter Stellung. Keine Federkräfte, Kollisionen oder Schleifenkinematik. Pro Körper höchstens ein übergeordnetes Gelenk, maximal 29 Verbindungen.
+
+Architektur: `sketch-solver.js`, `sketch-operations.js`, `model-geometry.js`, `model-parameters.js`, `assembly.js` und `engineering-editor.js`. Der CAD-Worker berechnet Constraints, Maßbindungen, Muster und Gelenkstellungen bei jedem Modellaufbau erneut; Vorschau und Export verwenden denselben Stand. Körperreferenzen werden weiterhin validiert, Sperren und atomare Projektübernahme bleiben aktiv. Die README beschreibt die Bedienung und Grenzen ausführlich.
+
+Prüfungen: `tests/engineering.spec.js` ergänzt echte CAD-Volumina und Exporte, Solver-Konflikte, analytische Bogen-/Versatzgeometrie, Formeltopologie, Muster, Baugruppenhierarchie und Browserabläufe. Offline-Produktion schließt die neuen Dialoge und Gelenke ein.
+
+## Historische Bestandsaufnahme vor diesem Ausbau
+
+
 
 | Bereich | Vorhanden | Noch offen |
 | --- | --- | --- |
@@ -93,3 +110,13 @@ Projektfeld `sketches` enthält benannte Quellen mit Linien/Kreisen; Körper der
 Grenzen: XZ-Ebene, 128 Elemente / 128 erkannte Bereiche / 32 ausgewählte Flächen pro Rotation, 32 Skizzen pro Projekt. Noch keine allgemeinen Constraints oder freie Bögen/Splines, keine Rotation als Flächenfeature und keine automatische Aufteilung in mehrere getrennte Volumenkörper. Die bisherige Kontur-Skizzenbedienung bleibt zusätzlich verfügbar.
 
 Prüfungen in `tests/sketch-regions.spec.js`: Flächenaufteilung, offene Äste, doppelte/überlappende Linien, Kreisschnitte, geschachtelte Löcher, genaue native Volumina, Halbkreis zu Kugel, schräge Drehachse, Achsendurchtritt, ungültige Bezüge, Quellenkopien und Sperren; Browserklicks, 3D-Vorschau, Speichern/Wiederöffnen, Punktbewegung, Undo und Entwurfswiederherstellung. Produktions- und MCP-Tests schließen die neuen Skizzen ein.
+
+## Flächenbezogene Griffmulden und Kreuzrändel
+
+Die Auswahl verwaltet mehrere Flächen samt Körperkennung. Strg/Cmd-Klick schaltet einzelne Flächen um; Umschalt-Klick behält die bisherige Körperauswahl. Alle gewählten Flächen werden hervorgehoben. Neue Strukturen erfordern ausdrücklich eine Flächenauswahl. Über mehrere Körper hinweg werden die Bearbeitungen zusammen in einem rückgängig machbaren Schritt übernommen.
+
+`surfaceTexture` speichert `targets: [{face, reference}]` und `params: {mode, count, radius, depth, angle}`. `grooves` erzeugt runde parallele Nuten, `knurl` zwei schräge Richtungen. Runde Werkzeugquerschnitte werden entlang der Flächenkoordinaten geführt. Ebene Linien sind exakt, gekrümmte Bahnen werden als B-Splines approximiert (0,005 mm Kurventoleranz). Native Verdickung der originalen getrimmten Fläche begrenzt die Werkzeuge einschließlich Innenkonturen auf die gewählte Fläche und Tiefe. Bei Rundflächen schließen die Teilungen an der Naht; bei Kegelflächen folgen sie der Parametrisierung. Das erzeugte Kreuzmuster ist kein normgeprüftes Rändelprofil.
+
+Grenzen: 2–48 Teilungen, bis zu acht Flächen je Aktion und maximal 256 Strukturnuten pro Modellberechnung. Flächen mit Singularitäten, unzulässige Offsets, zu enge Teilung, unklare Referenzen und ungültige oder getrennte Resultate werden abgewiesen. Maßformeln, Modellverlauf, Unterdrücken und STEP/STL nutzen dieselbe native Geometrie. Die ältere `grip`-Bearbeitung mit automatischem Gesamtumfang bleibt für vorhandene Projekte lesbar und bearbeitbar, wird von den neuen Schaltflächen aber nicht mehr angelegt.
+
+Prüfungen: ebene und mehrere ausgewählte Flächen, Zylinderband auf einem abgestuften und gedrehten Bauteil bei unverändertem unteren Umfang, Kreuzrändel auf Ebene/Zylinder/Kegel, native Exporte, Strg-Auswahl und Abwahl, Historienbearbeitung, Wiederöffnen, Undo und atomare Fehlerbehandlung. Kern und Oberfläche erhalten die übrigen laufenden CAD-Erweiterungen.

@@ -1,3 +1,5 @@
+import {patternTransforms} from './model-geometry.js';
+import {bindMeasures} from './model-parameters.js';
 import {Matrix4,Vector3,Quaternion,Euler} from './vendor/three.module.js';
 import {evaluateExpression,resolveVariables} from './expressions.js';
 
@@ -8,7 +10,7 @@ const axes={x:new Vector3(1,0,0),y:new Vector3(0,1,0),z:new Vector3(0,0,1)};
 // Numeric paths only: names, IDs, STEP data and geometric references stay literal.
 export function bindParameters(body,values,depth=0){
  if(depth>8)fail('Körper zu tief verschachtelt.');
- const copy=structuredClone(body);
+ const copy=bindMeasures(body,values);
  if(copy.expressions!=null){
   if(typeof copy.expressions!=='object'||Array.isArray(copy.expressions)||Object.keys(copy.expressions).length>64)fail('Ungültige Maßformeln.');
   for(const [key,expression] of Object.entries(copy.expressions)){
@@ -46,10 +48,10 @@ export function expandGenerators(input){
   function emit(node,parent,path){
    if(++visits>512)fail('Generator enthält zu viele verschachtelte Wiederholungen.');
    const pattern=node.pattern??{mode:'none'},mode=pattern.mode??'none';
-   if(!['none','linear','circular'].includes(mode))fail('Unbekanntes Generatormuster.');
+   if(!['none','linear','circular','path'].includes(mode))fail('Unbekanntes Generatormuster.');
    const count=mode==='none'?1:evaluate(pattern.count??2);
    if(!Number.isInteger(count)||count<1||count>30)fail('Musteranzahl muss ganzzahlig zwischen 1 und 30 sein.');
-   const base=matrix(node);let step,angle,axis,center;
+   const base=matrix(node);let step,angle,axis,center;const pathTransforms=mode==='path'?patternTransforms({mode,count,points:pattern.points?.map(p=>vector(p,'Pfadpunkt'))}):null;
    if(mode==='linear'){step=vector(pattern.step??[20,0,0],'Musterabstand');if(count>1&&step.every(n=>n===0))fail('Musterabstand darf nicht null sein.');}
    if(mode==='circular'){
     axis=axes[pattern.axis??'z'];if(!axis)fail('Musterachse X, Y oder Z wählen.');
@@ -58,6 +60,7 @@ export function expandGenerators(input){
    }
    for(let index=0;index<count;index++){
     const repeat=new Matrix4();
+    if(mode==='path')repeat.makeTranslation(...pathTransforms[index].translation);
     if(mode==='linear')repeat.makeTranslation(...step.map(v=>v*index));
     if(mode==='circular'){
      const a=angle*radians*index/(count===1?1:Math.abs(angle)===360?count:count-1);

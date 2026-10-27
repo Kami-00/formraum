@@ -1,3 +1,6 @@
+import {releaseChangedMeasures} from './model-parameters.js';
+import {setupEngineeringEditor} from './engineering-editor.js';
+import {poseMatrix} from './model-geometry.js';
 import {setupRegionEditor} from './region-editor.js';
 import {setupGeneratorEditor} from './generator-editor.js';
 import {evaluateExpression,resolveVariables} from './expressions.js';
@@ -33,6 +36,8 @@ let draftBase=null,draftId=null,draftSourceId=null,draftTimer,lastDraftSignature
 let activeProjectId=null,projectRevision=0,lastCommitError='',sessionReady=false;
 const makeDefault = () => ({version:1,name:'Mein Bauteil',objects:[{id:uid(),name:'Quader 01',kind:'box',params:{width:40,depth:30,height:12},position:[0,0,0],features:[],color:'#67aba9'}]});
 let project=makeDefault(), models=[], selectedId=project.objects[0].id, selectedFace=null, selectedEdges=new Set(), selectedFeature=-1;
+const selectedFaces=new Map();
+let textureMode='grooves';
 let tool='select', sketch=null, busy=false, undoStack=[], redoStack=[], hoverEdge=null, drag=null, requestVersion=0, toastTimer, edgeSize=1;
 let savedCamera=null, lastPointer=null, selectedContour=0;
 let selectedBodies=new Set([selectedId]);
@@ -70,7 +75,7 @@ const transformControl=new TransformControls(camera,renderer.domElement);transfo
 let transformStart=null;
 transformControl.addEventListener('mouseDown',()=>{
  if(busy||!['rotate','scale'].includes(tool))return;
- transformStart={ids:[...selectedBodies],center:transformProxy.position.toArray()};controls.enabled=false;selectedFace=null;renderSelection();
+ transformStart={ids:[...selectedBodies],center:transformProxy.position.toArray()};controls.enabled=false;selectedFace=null;selectedFaces.clear();renderSelection();
 });
 transformControl.addEventListener('objectChange',()=>{
  if(!transformStart)return;
@@ -126,10 +131,11 @@ function renderBodies(){
 }
 function renderSelection(){
  disposeGroup(overlayRoot);
- if(selectedFace&&tool!=='fillet'&&tool!=='chamfer'){
-  const model=models.find(m=>m.id===selectedId);
+ for(const selection of selectedFaces.size?[...selectedFaces.values()]:(selectedFace?[{bodyId:selectedId,face:selectedFace}]:[])){
+  if(tool==='fillet'||tool==='chamfer')continue;
+  const model=models.find(m=>m.id===selection.bodyId);
   if(model){
-   const triangles=model.mesh.triangles.filter((t,i)=>model.mesh.faceIds[i]===selectedFace.id);
+   const triangles=model.mesh.triangles.filter((t,i)=>model.mesh.faceIds[i]===selection.face.id);
    const flat=triangles.flatMap(t=>t.flatMap(i=>model.mesh.vertices[i]));
    const geom=new THREE.BufferGeometry();geom.setAttribute('position',new THREE.Float32BufferAttribute(flat,3));geom.computeVertexNormals();
    const mat=new THREE.MeshBasicMaterial({color:tool==='sketch'?0x24b5a0:0xe8c46d,transparent:true,opacity:tool==='sketch'?.13:.32,side:THREE.DoubleSide,depthWrite:false,polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2});
@@ -165,7 +171,18 @@ function setView(view){
 function selectObject(id,face=null,additive=false){
  if(additive&&id){selectedBodies.has(id)?selectedBodies.delete(id):selectedBodies.add(id);if(!selectedBodies.has(selectedId))selectedId=[...selectedBodies][0]||null;}
  else{selectedId=id;selectedBodies=new Set(id?[id]:[]);}
- selectedFace=selectedBodies.size===1&&selectedId===id?face:null;selectedFeature=-1;selectedEdges.clear();hoverEdge=null;
+ selectedFaces.clear();
+ selectedFace=selectedBodies.size===1&&selectedId===id?face:null;if(selectedFace)selectedFaces.set(id+':'+face.id,{bodyId:id,face});selectedFeature=-1;selectedEdges.clear();hoverEdge=null;
+ renderBodies();renderPanels();
+}
+
+function selectSurface(bodyId,face,additive=false){
+ if(!face)return selectObject(bodyId);
+ const key=bodyId+':'+face.id;
+ if(!additive)selectedFaces.clear();
+ if(additive&&selectedFaces.has(key))selectedFaces.delete(key);else selectedFaces.set(key,{bodyId,face});
+ selectedBodies=new Set([...selectedFaces.values()].map(s=>s.bodyId));selectedId=selectedBodies.has(bodyId)?bodyId:[...selectedBodies][0]??null;
+ selectedFace=selectedFaces.size===1?[...selectedFaces.values()][0].face:null;selectedFeature=-1;selectedEdges.clear();hoverEdge=null;
  renderBodies();renderPanels();
 }
 function currentSpec(){return project.objects.find(o=>o.id===selectedId);}
@@ -188,7 +205,7 @@ async function commit(next,{record=true,fit=false,message='',entry=null,create=f
   activeProjectId=saved.id;projectRevision=saved.revision;library.activate(saved.id);
   project=clone(result.project);models=result.objects;clearSection();
   if(!project.objects.some(o=>o.id===selectedId))selectedId=project.objects[0]?.id||null;
-  selectedFace=null;selectedEdges.clear();hoverEdge=null;selectedFeature=-1;selectedContour=0;selectedBodies=new Set(selectedId?[selectedId]:[]);
+  selectedFace=null;selectedFaces.clear();selectedEdges.clear();hoverEdge=null;selectedFeature=-1;selectedContour=0;selectedBodies=new Set(selectedId?[selectedId]:[]);
   inspectorDirty=false;renderBodies();renderPanels();renderProjectList();$('#autosave-status').textContent='Projekt im Browser gespeichert';
   setStatus(`${models.length} Körper · Geometrie bereit`);
   if(fit)fitView();if(message)toast(message);return true;
@@ -225,9 +242,9 @@ window.addEventListener('storage',event=>{
 function field(label,key,value,unit='mm',extra=''){
  return `<label class="field"><span>${esc(label)}</span><div class="input-unit"><input type="number" data-field="${esc(key)}" value="${Number(value??0)}" ${extra.includes('step=')?'':'step="0.1"'} ${extra} aria-label="${esc(label)}">${unit?`<em>${esc(unit)}</em>`:''}</div></label>`;
 }
-function featureName(f){return ({extrude:'Aufbauen',pocket:'Ausschneiden',fillet:'Rundung',chamfer:'Fase',shell:'Wandung'})[f.type]||f.type;}
-function featureIcon(f){return ({extrude:'extrude',pocket:'cut',fillet:'fillet',chamfer:'chamfer'})[f.type]||'sketch';}
-function featureDetail(f){const scale=currentSpec()?.scale??1;return f.type==='shell'?`${fmt(f.thickness*scale)} mm Wand`:f.type==='fillet'?`R ${fmt(f.radius*scale)}`:f.type==='chamfer'?`${fmt(f.distance*scale)} mm`:`${fmt(f.depth*scale)} mm`;}
+function featureName(f){if(f.type==='surfaceTexture')return f.params.mode==='knurl'?'Kreuzrändel':'Griffmulden auf Flächen';if(f.type==='region')return (f.operation==='extrude'?'Skizzenaufbau':'Skizzenrotation')+(f.combine==='cut'?' · Ausschneiden':'');return ({extrude:'Aufbauen',pocket:'Ausschneiden',fillet:'Rundung',chamfer:'Fase',shell:'Wandung',grip:'Griffmulden'})[f.type]||f.type;}
+function featureIcon(f){return ({extrude:'extrude',pocket:'cut',fillet:'fillet',chamfer:'chamfer',grip:'grip',surfaceTexture:'grip'})[f.type]||'sketch';}
+function featureDetail(f){const scale=currentSpec()?.scale??1;if(f.type==='surfaceTexture')return `${f.targets.length} Flächen · ${f.params.count} Nuten · ${fmt(f.params.depth*scale)} mm tief`;return f.type==='grip'?`${f.params.count} × R ${fmt(f.params.radius*scale)} mm`:f.type==='shell'?`${fmt(f.thickness*scale)} mm Wand`:f.type==='fillet'?`R ${fmt(f.radius*scale)}`:f.type==='chamfer'?`${fmt(f.distance*scale)} mm`:`${fmt(f.depth*scale)} mm`;}
 function renderPanels(){
  $('#region-sketch-list').innerHTML=(project.sketches??[]).map(s=>`<button class="subtle-button" data-open-region-sketch="${esc(s.id)}">✎ ${esc(s.name||'Freie Skizze')}</button>`).join('');
  $('#project-name').value=project.name||'Unbenanntes Bauteil';$('#body-count').textContent=project.objects.length;
@@ -235,14 +252,16 @@ function renderPanels(){
  const spec=currentSpec();
  $('#feature-list').innerHTML=spec?`<div class="feature-row ${selectedFeature===-1?'current':''}" data-feature="-1" role="button" tabindex="0" aria-label="Grundkörper" title="Grundkörper">${icon(spec.kind==='cylinder'?'cylinder':'box')}<span>${spec.kind==='imported'?'STEP-Import':'Grundkörper'}</span></div>`+(spec.features||[]).map((f,i)=>`<div class="feature-row ${i===selectedFeature?'current':''}" data-feature="${i}" role="button" tabindex="0" aria-label="${esc(featureName(f)+' '+featureDetail(f))}" title="${esc(featureName(f)+' '+featureDetail(f))}">${icon(featureIcon(f))}<span>${featureName(f)}${f.suppressed?' · unterdrückt':''}${i>=(spec.rollback??Infinity)?' · später':''} <small>${esc(featureDetail(f))}</small></span><button class="remove-feature" data-remove-feature="${i}" title="Diesen und folgende Schritte entfernen" aria-label="Diesen und folgende Schritte entfernen">×</button></div>`).join(''):'';
  renderInspector();
- const faceText=selectedFace?` · Fläche ${selectedFace.id}`:'';
- $('#selection-status').textContent=selectedBodies.size>1?`${selectedBodies.size} Körper ausgewählt · Basis: ${spec?.name||''}`:spec?`${spec.name}${faceText}`:'Keine Auswahl';
+ const faceText=selectedFaces.size>1?` · ${selectedFaces.size} Flächen`:selectedFace?` · Fläche ${selectedFace.id}`:'';
+ $('#selection-status').textContent=selectedBodies.size>1?`${selectedBodies.size} Körper ausgewählt${faceText} · Basis: ${spec?.name||''}`:spec?`${spec.name}${faceText}`:'Keine Auswahl';
  updateToolButtons();updateUndo();
 }
 function renderInspector(){
  inspectorDirty=false;
  const root=$('#inspector'),spec=currentSpec(),model=currentModel();
  if(sketch){renderSketchInspector();return;}
+ if(tool==='texture'){renderTextureInspector();return;}
+ if(tool==='grip'){renderGripInspector();return;}
  if(tool==='pattern'){renderPatternInspector();return;}
  if(tool==='measure'){renderMeasureInspector();return;}
  if(tool==='section'){renderSectionInspector();return;}
@@ -258,22 +277,26 @@ function renderInspector(){
  if(spec.generated){root.innerHTML=`<div class="inspector-heading">GENERATORKÖRPER</div><div class="inspector-content"><h3>${esc(spec.name)}</h3><p class="muted">Dieser Körper folgt seinem Generator. Maße, Drehung, Muster und Children dort ändern.</p><button class="primary" data-open-generator="${esc(spec.generated.generatorId)}">Generator bearbeiten</button><button class="subtle-button" data-action="duplicate-body">Als freien Körper duplizieren</button><p class="tip">Im Generator kannst du die gesamte Gruppe in freie Körper umwandeln, um anschließend Flächen und Kanten einzeln zu bearbeiten.</p></div>`;return;}
  if(selectedFeature>=0&&spec.features?.[selectedFeature]){renderFeatureInspector(spec.features[selectedFeature]);return;}
  const bounds=vec(model.bounds.max).sub(vec(model.bounds.min));
- const faceCard=selectedFace?`<div class="face-card"><div class="face-title">${icon('sketch')}Fläche ${selectedFace.id} ausgewählt</div><p>${selectedFace.planar?'Ebene Fläche · '+fmt(selectedFace.area)+' mm²':'Gekrümmte Fläche · '+fmt(selectedFace.area)+' mm²'}</p><button class="primary" data-action="start-sketch" ${selectedFace.planar?'':'disabled'}>${icon('sketch')}Skizze auf Fläche</button>${field('Wandstärke','shell-thickness',2)}<label class="locked-dimension"><input type="checkbox" id="shell-closed"> Geschlossen aushöhlen</label><button class="subtle-button" data-action="apply-shell">Wandung anwenden</button><p class="tip">Wandung nach innen. Die ausgewählte Fläche wird zur Öffnung, außer bei geschlossenem Aushöhlen.</p>${!selectedFace.planar?'<p>Wähle zum Zeichnen eine ebene Fläche.</p>':''}</div>`:'';
- root.innerHTML=`<div class="inspector-heading">EIGENSCHAFTEN<button class="icon-button" data-action="delete-body" title="Körper löschen" aria-label="Körper löschen">${icon('trash')}</button></div><div class="inspector-content"><div class="object-type">${icon(spec.kind==='cylinder'?'cylinder':'box')}${esc(shapeName(spec.kind))}</div><input class="name-field" data-field="body-name" aria-label="Körpername" value="${esc(spec.name)}">${faceCard}<div class="section-title">AUSSENMASSE<span>mm</span></div><div class="bounds-display">${fmt(bounds.x)} <i>×</i> ${fmt(bounds.y)} <i>×</i> ${fmt(bounds.z)}</div>${spec.locked?'<p class="tip">Körper gesperrt. Zum Bearbeiten zuerst links entsperren.</p>':''}${bodyParameterFields(spec)}${spec.rollback!=null?`<p class="tip">Modellverlauf bei Schritt ${spec.rollback} angehalten.</p><button class="subtle-button" data-action="resume-history">Alle Schritte wiederherstellen</button>`:''}${['gear','thread'].includes(spec.kind)?'<p class="tip">'+(spec.kind==='gear'?'Geradverzahnung mit angenäherter Evolvente, 20° Druckwinkel; kein Normprofil.':'Echtes Rechtsgewinde mit vereinfachtem Profil; kein normgeprüftes ISO-Gewinde. Als Bohrung gruppiert entsteht ein Innengewinde.')+'</p>':''}<div class="body-role"><button data-body-role="solid" class="${!spec.hole?'active':''}">Körper</button><button data-body-role="hole" class="${spec.hole?'active':''}">Bohrung</button></div><div class="section-title">POSITION</div><div class="fields-3">${field('X','position-x',spec.position?.[0]||0)}${field('Y','position-y',spec.position?.[1]||0)}${field('Z','position-z',spec.position?.[2]||0)}</div><div class="section-title">DREHUNG<span>° · X → Y → Z</span></div><div class="fields-3">${field('X','rotation-x',spec.rotation?.[0]||0,'°')}${field('Y','rotation-y',spec.rotation?.[1]||0,'°')}${field('Z','rotation-z',spec.rotation?.[2]||0,'°')}</div>${field('Skalierung · gleichmäßig','scale',spec.scale??1,'×')}${field('Materialdichte · 0 = unbekannt','density',spec.density??0,'g/cm³','min="0" max="30"')}<button class="primary" data-action="apply-dimensions">${icon('check')}Maße übernehmen</button><div class="body-actions"><button class="subtle-button" data-action="duplicate-body">Duplizieren</button><button class="subtle-button" data-action="ground-body">Auf Boden</button></div>${spec.kind==='boolean'?`<button class="subtle-button" data-action="ungroup" ${spec.features?.length?'disabled':''}>Kombination auflösen</button><p class="tip">Ausgangsformen bleiben bearbeitbar. Auflösen ist vor zusätzlichen Modellschritten möglich.</p>`:''}<div class="body-actions"><button class="subtle-button" data-action="copy-bodies">Kopieren</button><button class="subtle-button" data-action="cut-bodies">Ausschneiden</button><button class="subtle-button" data-action="paste-bodies">Einfügen</button></div><div class="volume"><span>Volumen</span><span>${fmt(model.volume)} mm³</span></div>${spec.density>0?`<div class="volume"><span>Masse</span><span>${fmt(model.volume*spec.density/1000,3)} g</span></div>`:''}${!selectedFace?'<hr class="divider"><p class="muted">Klicke auf eine Fläche, um dort eine Skizze anzulegen.</p>':''}</div>`;
+ const faceCard=selectedFace?`<div class="face-card"><div class="face-title">${icon('sketch')}Fläche ${selectedFace.id} ausgewählt</div><p>${selectedFace.planar?'Ebene Fläche · '+fmt(selectedFace.area)+' mm²':'Gekrümmte Fläche · '+fmt(selectedFace.area)+' mm²'}</p><button class="primary" data-action="start-sketch" ${selectedFace.planar?'':'disabled'}>${icon('sketch')}Skizze auf Fläche</button><button class="subtle-button" data-action="free-face-sketch" ${selectedFace.planar?'':'disabled'}>Freie Linien, Kreise und Bögen auf Fläche</button>${field('Wandstärke','shell-thickness',2)}<label class="locked-dimension"><input type="checkbox" id="shell-closed"> Geschlossen aushöhlen</label><button class="subtle-button" data-action="apply-shell">Wandung anwenden</button><p class="tip">Wandung nach innen. Die ausgewählte Fläche wird zur Öffnung, außer bei geschlossenem Aushöhlen.</p>${!selectedFace.planar?'<p>Wähle zum Zeichnen eine ebene Fläche.</p>':''}</div>`:'';
+ root.innerHTML=`<div class="inspector-heading">EIGENSCHAFTEN<button class="icon-button" data-action="delete-body" title="Körper löschen" aria-label="Körper löschen">${icon('trash')}</button></div><div class="inspector-content"><div class="object-type">${icon(spec.kind==='cylinder'?'cylinder':'box')}${esc(shapeName(spec.kind))}</div><input class="name-field" data-field="body-name" aria-label="Körpername" value="${esc(spec.name)}">${faceCard}${selectedFaces.size>1?`<p class="tip">${selectedFaces.size} Flächen gewählt · Strg + Klick zum Ergänzen oder Entfernen</p>`:''}<div class="body-actions"><button class="subtle-button" data-action="open-grip">${icon('grip')}Griffmulden</button><button class="subtle-button" data-action="open-knurl">${icon('grip')}Rändel</button></div><div class="section-title">AUSSENMASSE<span>mm</span></div><div class="bounds-display">${fmt(bounds.x)} <i>×</i> ${fmt(bounds.y)} <i>×</i> ${fmt(bounds.z)}</div>${spec.locked?'<p class="tip">Körper gesperrt. Zum Bearbeiten zuerst links entsperren.</p>':''}${bodyParameterFields(spec)}${spec.rollback!=null?`<p class="tip">Modellverlauf bei Schritt ${spec.rollback} angehalten.</p><button class="subtle-button" data-action="resume-history">Alle Schritte wiederherstellen</button>`:''}${['gear','thread'].includes(spec.kind)?'<p class="tip">'+(spec.kind==='gear'?'Geradverzahnung mit angenäherter Evolvente, 20° Druckwinkel; kein Normprofil.':'Echtes Rechtsgewinde mit vereinfachtem Profil; kein normgeprüftes ISO-Gewinde. Als Bohrung gruppiert entsteht ein Innengewinde.')+'</p>':''}<div class="body-role"><button data-body-role="solid" class="${!spec.hole?'active':''}">Körper</button><button data-body-role="hole" class="${spec.hole?'active':''}">Bohrung</button></div><div class="section-title">POSITION</div><div class="fields-3">${field('X','position-x',spec.position?.[0]||0)}${field('Y','position-y',spec.position?.[1]||0)}${field('Z','position-z',spec.position?.[2]||0)}</div><div class="section-title">DREHUNG<span>° · X → Y → Z</span></div><div class="fields-3">${field('X','rotation-x',spec.rotation?.[0]||0,'°')}${field('Y','rotation-y',spec.rotation?.[1]||0,'°')}${field('Z','rotation-z',spec.rotation?.[2]||0,'°')}</div>${field('Skalierung · gleichmäßig','scale',spec.scale??1,'×')}${field('Materialdichte · 0 = unbekannt','density',spec.density??0,'g/cm³','min="0" max="30"')}<button class="primary" data-action="apply-dimensions">${icon('check')}Maße übernehmen</button><div class="body-actions"><button class="subtle-button" data-action="duplicate-body">Duplizieren</button><button class="subtle-button" data-action="ground-body">Auf Boden</button></div>${spec.kind==='boolean'?`<button class="subtle-button" data-action="ungroup" ${spec.features?.length?'disabled':''}>Kombination auflösen</button><p class="tip">Ausgangsformen bleiben bearbeitbar. Auflösen ist vor zusätzlichen Modellschritten möglich.</p>`:''}<div class="body-actions"><button class="subtle-button" data-action="copy-bodies">Kopieren</button><button class="subtle-button" data-action="cut-bodies">Ausschneiden</button><button class="subtle-button" data-action="paste-bodies">Einfügen</button></div><div class="volume"><span>Volumen</span><span>${fmt(model.volume)} mm³</span></div>${spec.density>0?`<div class="volume"><span>Masse</span><span>${fmt(model.volume*spec.density/1000,3)} g</span></div>`:''}${!selectedFace?'<hr class="divider"><p class="muted">Klicke auf eine Fläche, um dort eine Skizze anzulegen.</p>':''}</div>`;
 }
 function renderFeatureInspector(feature){
+ if(feature.type==='surfaceTexture'){renderTextureInspector(feature);return;}
+ if(feature.type==='grip'){renderGripInspector(feature);return;}
+ if(feature.type==='region'){$('#inspector').innerHTML=`<div class="inspector-content"><h3>${esc(featureName(feature))}</h3><button class="primary" data-action="edit-region-feature">Skizze und Flächen bearbeiten</button><button class="subtle-button" data-action="feature-pattern">Bearbeitung als Muster wiederholen</button><button class="subtle-button" data-action="bind-measures">Maße mit Variablen verknüpfen</button><button class="subtle-button" data-action="suppress-feature">${feature.suppressed?'Aktivieren':'Unterdrücken'}</button><button class="subtle-button" data-action="show-body">Zurück zum Körper</button></div>`;return;}
+
  const isSketch=feature.type==='extrude'||feature.type==='pocket',scale=currentSpec().scale??1;
  const profiles=isSketch?[feature.sketch,...(feature.contours??[])]:[],profile=profiles[Math.min(selectedContour,profiles.length-1)];
- $('#inspector').innerHTML=`<div class="inspector-heading">BEARBEITUNG ${selectedFeature+1}${icon(featureIcon(feature))}</div><div class="inspector-content"><h3>${esc(featureName(feature))}</h3>${isSketch?`${field('Höhe / Tiefe · alle Konturen','feature-depth',feature.depth*scale)}${feature.type==='pocket'?`<label class="locked-dimension"><input type="checkbox" data-feature-through-all ${feature.throughAll?'checked':''}> Durch alles ausschneiden</label>`:''}${profileSelector(profiles)}<div class="section-title">SKIZZE · ${sketchName(profile.kind).toUpperCase()}</div>${profile.kind==='polyline'?vertexEditor(profile,'feature',scale):isRadial(profile.kind)?field('Radius','feature-radius',profile.radius*scale):`${field('Breite','feature-width',profile.width*scale)}${field('Höhe','feature-height',profile.height*scale)}`}${profile.kind==='polygon'?field('Seiten','feature-sides',profile.sides,''):''}${field('Winkel','feature-angle',profile.angle??0,'°')}${placementFields(profile.constraints,feature.supportRectangle??true,'feature',scale,profile.distanceReference)}<div class="fields-2">${field('Mitte U','feature-u',profile.center[0]*scale)}${field('Mitte V','feature-v',profile.center[1]*scale)}</div>`:field(feature.type==='shell'?'Wandstärke':feature.type==='fillet'?'Radius':'Fasenmaß','feature-size',(feature.thickness??feature.radius??feature.distance)*scale)}<button class="primary" data-action="apply-feature">${icon('check')}Änderung übernehmen</button><div class="body-actions"><button class="subtle-button" data-action="suppress-feature">${feature.suppressed?'Aktivieren':'Unterdrücken'}</button><button class="subtle-button" data-action="rollback-feature">Bis hier anzeigen</button></div><div class="body-actions"><button class="subtle-button" data-reorder-feature="-1" ${selectedFeature===0?'disabled':''}>Früher</button><button class="subtle-button" data-reorder-feature="1" ${selectedFeature===currentSpec().features.length-1?'disabled':''}>Später</button></div><button class="subtle-button" data-action="show-body">Zurück zum Körper</button><p class="tip">Die folgenden Modellschritte werden mit deinen neuen Maßen erneut berechnet.</p></div>`;
+ $('#inspector').innerHTML=`<div class="inspector-heading">BEARBEITUNG ${selectedFeature+1}${icon(featureIcon(feature))}</div><div class="inspector-content"><h3>${esc(featureName(feature))}</h3>${isSketch?`${field('Höhe / Tiefe · alle Konturen','feature-depth',feature.depth*scale)}${feature.type==='pocket'?`<label class="locked-dimension"><input type="checkbox" data-feature-through-all ${feature.throughAll?'checked':''}> Durch alles ausschneiden</label>`:''}${profileSelector(profiles)}<div class="section-title">SKIZZE · ${sketchName(profile.kind).toUpperCase()}</div>${profile.kind==='polyline'?vertexEditor(profile,'feature',scale):isRadial(profile.kind)?field('Radius','feature-radius',profile.radius*scale):`${field('Breite','feature-width',profile.width*scale)}${field('Höhe','feature-height',profile.height*scale)}`}${profile.kind==='polygon'?field('Seiten','feature-sides',profile.sides,''):''}${field('Winkel','feature-angle',profile.angle??0,'°')}${placementFields(profile.constraints,feature.supportRectangle??true,'feature',scale,profile.distanceReference)}<div class="fields-2">${field('Mitte U','feature-u',profile.center[0]*scale)}${field('Mitte V','feature-v',profile.center[1]*scale)}</div>`:field(feature.type==='shell'?'Wandstärke':feature.type==='fillet'?'Radius':'Fasenmaß','feature-size',(feature.thickness??feature.radius??feature.distance)*scale)}<button class="primary" data-action="apply-feature">${icon('check')}Änderung übernehmen</button><button class="subtle-button" data-action="feature-pattern" ${isSketch?'':'disabled'}>Bearbeitung als Muster wiederholen</button><button class="subtle-button" data-action="bind-measures">Maße mit Variablen verknüpfen</button><div class="body-actions"><button class="subtle-button" data-action="suppress-feature">${feature.suppressed?'Aktivieren':'Unterdrücken'}</button><button class="subtle-button" data-action="rollback-feature">Bis hier anzeigen</button></div><div class="body-actions"><button class="subtle-button" data-reorder-feature="-1" ${selectedFeature===0?'disabled':''}>Früher</button><button class="subtle-button" data-reorder-feature="1" ${selectedFeature===currentSpec().features.length-1?'disabled':''}>Später</button></div><button class="subtle-button" data-action="show-body">Zurück zum Körper</button><p class="tip">Die folgenden Modellschritte werden mit deinen neuen Maßen erneut berechnet.</p></div>`;
  syncPlacementControls();
 }
 function parameterField(spec,label,key,inputKey){
- const value=spec.expressions?.[key]??spec.params[key]??SHAPES[spec.kind]?.params[key];
+ const value=spec.bindings?.['params.'+key]??spec.expressions?.[key]??spec.params[key]??SHAPES[spec.kind]?.params[key];
  return `<label class="field"><span>${esc(label)} <small>· Zahl / Formel</small></span><input type="text" data-field="${esc(inputKey)}" value="${esc(value)}" aria-label="${esc(label)}" spellcheck="false" title="Projektvariable oder Formel, z. B. breite / 2"></label>`;
 }
 function readParameter(spec,key,inputKey){
  const value=$(`[data-field="${inputKey}"]`).value.trim(),variables=resolveVariables(project.variables??{});
- spec.params[key]=evaluateExpression(value,name=>variables[name]);
+ spec.params[key]=evaluateExpression(value,name=>variables[name]);if(spec.bindings)delete spec.bindings['params.'+key];
  if(value!==''&&Number.isFinite(Number(value))){if(spec.expressions)delete spec.expressions[key];}
  else{spec.expressions??={};spec.expressions[key]=value;}
 }
@@ -306,13 +329,15 @@ async function applyDimensions(){
   spec.density=inputNumber('density');if(spec.density<0||spec.density>30)throw new Error('Dichte zwischen 0 und 30 g/cm³ eingeben.');
   spec.rotation=['x','y','z'].map(d=>inputNumber('rotation-'+d));spec.scale=inputNumber('scale');
   spec.position=['x','y','z'].map(d=>inputNumber('position-'+d));
-  await commit(next,{message:'Maße übernommen'});
+  releaseChangedMeasures(currentSpec(),spec);await commit(next,{message:'Maße übernommen'});
  }catch(e){toast(e.message,true);}
 }
 async function applyFeature(){
  try{
   const next=clone(project),f=next.objects.find(o=>o.id===selectedId).features[selectedFeature],scale=currentSpec().scale??1;
-  if(f.type==='extrude'||f.type==='pocket'){
+  if(f.type==='surfaceTexture')f.params=readTextureParameters(currentSpec().scale??1);
+  else if(f.type==='grip')f.params=readGripParameters();
+  else if(f.type==='extrude'||f.type==='pocket'){
    const profile=[f.sketch,...(f.contours??[])][selectedContour];
    profile.role=$('[data-field="profile-role"]').value;
    profile.angle=inputNumber('feature-angle');if(profile.kind==='polygon')profile.sides=inputNumber('feature-sides');
@@ -320,13 +345,13 @@ async function applyFeature(){
    f.throughAll=f.type==='pocket'&&!!$('[data-feature-through-all]')?.checked;f.depth=inputNumber('feature-depth')/scale;profile.center=[inputNumber('feature-u')/scale,inputNumber('feature-v')/scale];
    if(profile.kind==='polyline')profile.vertices=readVertices(profile,'feature',scale);else if(isRadial(profile.kind))profile.radius=inputNumber('feature-radius')/scale;else{profile.width=inputNumber('feature-width')/scale;profile.height=inputNumber('feature-height')/scale;}
   }else if(f.type==='shell')f.thickness=inputNumber('feature-size')/scale;else if(f.type==='fillet')f.radius=inputNumber('feature-size')/scale;else f.distance=inputNumber('feature-size')/scale;
-  await commit(next,{message:'Bearbeitung geändert'});
+  releaseChangedMeasures(currentSpec(),next.objects.find(o=>o.id===selectedId));await commit(next,{message:'Bearbeitung geändert'});
  }catch(e){toast(e.message,true);}
 }
 async function applyShell(){
  if(busy||!selectedFace||!currentSpec())return;
  if(!allowNewFeature())return;
- try{const next=clone(project),spec=next.objects.find(o=>o.id===selectedId);spec.features.push({type:'shell',closed:$('#shell-closed').checked,face:selectedFace.id,reference:selectedFace.reference,thickness:inputNumber('shell-thickness')/(spec.scale??1)});if(await commit(next,{message:'Körper ausgehöhlt · Wandstärke im Verlauf änderbar'})){selectedFace=null;renderPanels();renderSelection();}}catch(e){toast(e.message,true);}
+ try{const next=clone(project),spec=next.objects.find(o=>o.id===selectedId);spec.features.push({type:'shell',closed:$('#shell-closed').checked,face:selectedFace.id,reference:selectedFace.reference,thickness:inputNumber('shell-thickness')/(spec.scale??1)});if(await commit(next,{message:'Körper ausgehöhlt · Wandstärke im Verlauf änderbar'})){selectedFace=null;selectedFaces.clear();renderPanels();renderSelection();}}catch(e){toast(e.message,true);}
 }
 async function applyEdge(){
  if(!selectedEdges.size||!currentSpec())return;
@@ -338,6 +363,8 @@ function updateToolButtons(){
  $('#mode-pill').textContent=sketch?(sketchName(sketch.kind)+' aufziehen oder Maße eingeben'):tool==='fillet'?'Kanten für die Rundung auswählen':tool==='chamfer'?'Kanten für die Fase auswählen':tool==='move'?`Auswahl in ${moveSettings.plane.toUpperCase()} verschieben · Alt: ohne Raster · Esc: abbrechen`:'Körper oder Fläche auswählen';
  renderer.domElement.style.cursor=sketch?'crosshair':tool==='move'?'move':tool==='fillet'||tool==='chamfer'?'crosshair':'default';
  if(tool==='rotate'||tool==='scale')$('#mode-pill').textContent=tool==='rotate'?'Farbringe ziehen · Esc bricht ab':'Griffe ziehen · gleichmäßig skalieren · Esc bricht ab';
+ if(tool==='texture')$('#mode-pill').textContent='Flächen wählen · Strg + Klick ergänzt oder entfernt eine Fläche';
+ if(tool==='grip')$('#mode-pill').textContent='Griffmulden · Körper auswählen und Maße rechts einstellen';
  if(tool==='pattern')$('#mode-pill').textContent='Kopien und Spiegeln · Körper auswählen, Maße rechts eingeben';
  if(tool==='measure'){$('#mode-pill').textContent='Messen · zwei Körper anklicken oder über Häkchen auswählen';renderer.domElement.style.cursor='crosshair';}
 }
@@ -541,7 +568,7 @@ async function applySketch(type){
  resetSketchPreviewWork();
  // A failed operation keeps the editable sketch and all prior geometry.
  const ok=await commit(next,{fromSketch:true,message:type==='extrude'?'Skizze aufgebaut':'Tasche ausgeschnitten'});
- if(ok){cancelSketch({discard:true});selectedFace=null;if(s.standalone)selectObject(next.objects.at(-1).id);renderSelection();renderPanels();renderProjectList();}
+ if(ok){cancelSketch({discard:true});selectedFace=null;selectedFaces.clear();if(s.standalone)selectObject(next.objects.at(-1).id);renderSelection();renderPanels();renderProjectList();}
  else{sketch=s;tool='sketch';selectedFace=s.face;renderSketchInspector();renderSelection();drawSketch();updateToolButtons();}
 }
 
@@ -629,7 +656,7 @@ renderer.domElement.addEventListener('pointerdown',event=>{
   const normal=vec(({xy:[0,0,1],xz:[0,1,0],yz:[1,0,0]})[moveSettings.plane]),ray=pointerRay(event);
   if(Math.abs(ray.direction.dot(normal))<.02){toast('Die Verschiebeebene steht seitlich zur Ansicht. Bitte die Ansicht drehen oder eine andere Ebene wählen.',true);return;}
   const plane=new THREE.Plane().setFromNormalAndCoplanarPoint(normal,hit.point),start=new THREE.Vector3();if(!ray.intersectPlane(plane,start))return;
-  selectedFace=null;renderSelection();
+  selectedFace=null;selectedFaces.clear();renderSelection();
   drag={kind:'move',plane,start,positions:selectedSpecs().map(o=>({id:o.id,position:clone(o.position??[0,0,0])})),delta:new THREE.Vector3()};renderer.domElement.setPointerCapture(event.pointerId);
  }
 });
@@ -683,10 +710,10 @@ renderer.domElement.addEventListener('pointerup',async event=>{
  if(tool==='fillet'||tool==='chamfer'){
   const hit=pickEdge(event);if(!hit)return;const id=hit.object.userData.body,edge=hit.object.userData.edge;
   if(id!==selectedId){selectedId=id;selectedBodies=new Set([id]);selectedEdges.clear();renderBodies();}
-  selectedEdges.has(edge)?selectedEdges.delete(edge):selectedEdges.add(edge);selectedFace=null;renderSelection();renderPanels();return;
+  selectedEdges.has(edge)?selectedEdges.delete(edge):selectedEdges.add(edge);selectedFace=null;selectedFaces.clear();renderSelection();renderPanels();return;
  }
  const hit=pickBody(event);
- if(hit){const model=hit.object.userData.model;const faceId=model.mesh.faceIds[hit.faceIndex];const face=model.faces.find(f=>f.id===faceId);selectObject(model.id,face?clone(face):null,event.shiftKey);}
+ if(hit){const model=hit.object.userData.model;const faceId=model.mesh.faceIds[hit.faceIndex];const face=model.faces.find(f=>f.id===faceId);if((event.ctrlKey||event.metaKey)&&face)selectSurface(model.id,clone(face),true);else selectObject(model.id,face?clone(face):null,event.shiftKey);}
  else selectObject(null);
 });
 renderer.domElement.addEventListener('dblclick',event=>{if(!sketch&&tool==='select'&&selectedFace?.planar)startSketch();});
@@ -765,7 +792,7 @@ document.addEventListener('click',async event=>{
  if(button?.dataset.removeFeature!==undefined){
   const next=clone(project),spec=next.objects.find(o=>o.id===selectedId),features=spec.features;const count=features.length-Number(button.dataset.removeFeature);features.splice(Number(button.dataset.removeFeature));if(spec.rollback!=null)spec.rollback=Math.min(spec.rollback,features.length);await commit(next,{message:count>1?'Bearbeitung und nachfolgende Schritte entfernt · Strg Z zum Wiederherstellen':'Bearbeitung entfernt'});return;
  }
- const featureRow=event.target.closest('[data-feature]');if(featureRow){if(sketch&&!cancelSketch())return;tool='select';selectedFeature=Number(featureRow.dataset.feature);selectedContour=0;selectedFace=null;selectedEdges.clear();renderSelection();renderPanels();return;}
+ const featureRow=event.target.closest('[data-feature]');if(featureRow){if(sketch&&!cancelSketch())return;tool='select';selectedFeature=Number(featureRow.dataset.feature);selectedContour=0;selectedFace=null;selectedFaces.clear();selectedEdges.clear();renderSelection();renderPanels();return;}
  if(button?.dataset.removeEdge){selectedEdges.delete(Number(button.dataset.removeEdge));renderSelection();renderInspector();return;}
  if(button?.dataset.contour!==undefined&&sketch){switchContour(Number(button.dataset.contour));return;}
  if(button?.dataset.contourRole&&sketch){sketch.role=button.dataset.contourRole;saveContour();renderSketchInspector();drawSketch();return;}
@@ -778,6 +805,10 @@ document.addEventListener('click',async event=>{
   case 'copy-bodies':copyBodies(false);break;
   case 'cut-bodies':copyBodies(true);break;
   case 'paste-bodies':pasteClipboard();break;
+  case 'bind-measures':openEngineering('parameters',selectedId);break;
+  case 'feature-pattern':openEngineering('pattern',selectedId,selectedFeature);break;
+  case 'free-face-sketch':openRegionSketch(undefined,selectedId,{plane:{origin:selectedFace.origin,u:selectedFace.u,normal:selectedFace.normal},support:{bodyId:selectedId,face:selectedFace.id,reference:selectedFace.reference}});break;
+  case 'edit-region-feature':{const f=currentSpec().features[selectedFeature];openRegionSketch(f.sketchId,selectedId,{featureIndex:selectedFeature,support:f.face?{bodyId:selectedId,face:f.face,reference:f.reference}:null});break;}
   case 'suppress-feature':changeHistory('suppress');break;
   case 'rollback-feature':changeHistory('rollback');break;
   case 'resume-history':changeHistory('resume');break;
@@ -794,6 +825,10 @@ document.addEventListener('click',async event=>{
   case 'ground-body':groundSelected();break;
   case 'ungroup':ungroupSelected();break;
   case 'start-sketch':startSketch();break;
+  case 'open-grip':openTexture('grooves');break;
+  case 'open-knurl':openTexture('knurl');break;
+  case 'apply-texture':applyTexture();break;
+  case 'apply-grip':applyGrip();break;
   case 'apply-shell':applyShell();break;
   case 'apply-edge':applyEdge();break;
   case 'cancel-tool':setTool('select');break;
@@ -837,13 +872,18 @@ $('#inspector').addEventListener('input',event=>{
  if(event.target.dataset.lock){sketch.locks[event.target.dataset.lock]=event.target.checked;queueSketchDraft();return;}
  if(event.target.dataset.sketch)setSketchDimension(event.target.dataset.sketch,event.target.value,event.target);
 });
-$('#inspector').addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('input')&&!sketch&&!busy){event.preventDefault();if(tool==='pattern')applyBodyPattern();else if(tool==='rotate'||tool==='scale')applyNumericTransform();else if(event.target.dataset.field==='edge-size')applyEdge();else if(event.target.dataset.field==='shell-thickness')applyShell();else selectedFeature>=0?applyFeature():applyDimensions();}});
+$('#inspector').addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('input')&&!sketch&&!busy){event.preventDefault();if(tool==='texture')applyTexture();else if(tool==='grip')applyGrip();else if(tool==='pattern')applyBodyPattern();else if(tool==='rotate'||tool==='scale')applyNumericTransform();else if(event.target.dataset.field==='edge-size')applyEdge();else if(event.target.dataset.field==='shell-thickness')applyShell();else selectedFeature>=0?applyFeature():applyDimensions();}});
+const openEngineering=setupEngineeringEditor({getProject:()=>project,getSelection:()=>[...selectedBodies],canOpen:()=>!busy&&!sketch&&!transformStart&&!drag&&!inspectorDirty,commit,getError:()=>lastCommitError,toast,onPreview:next=>{disposeGroup(overlayRoot);for(const [id,group] of groups){group.matrixAutoUpdate=false;if(!next)group.matrix.identity();else{const after=next.objects.find(o=>o.id===id),before=project.objects.find(o=>o.id===id);if(after&&before)group.matrix.copy(poseMatrix(after).multiply(poseMatrix(before).invert()));}}if(!next)renderSelection();}});
+$('#open-grip').onclick=()=>openTexture('grooves');
+$('#open-knurl').onclick=()=>openTexture('knurl');
+$('#open-assembly').onclick=()=>openEngineering('assembly');
+$('#open-bindings').onclick=()=>openEngineering('parameters');
+$('#open-feature-pattern').onclick=()=>openEngineering('pattern');
 const openRegionSketch=setupRegionEditor({getProject:()=>project,getProjectId:()=>activeProjectId,canOpen:()=>!busy&&!sketch&&!transformStart&&!drag&&!inspectorDirty,commit,getError:()=>lastCommitError,toast,onApplied:id=>selectObject(id)});
 $('#new-region-sketch').onclick=()=>openRegionSketch();
 const openGenerator=setupGeneratorEditor({getProject:()=>project,getSelection:()=>[...selectedBodies],commit,canOpen:()=>!busy&&!sketch&&!transformStart&&!drag&&!inspectorDirty,toast,getError:()=>lastCommitError});
 $('#open-generator').onclick=()=>openGenerator();
-$('#add-box').onclick=()=>addBody('box');$('#add-cylinder').onclick=()=>addBody('cylinder');
-$('#shape-library').innerHTML=Object.entries(SHAPES).filter(([kind])=>!['box','cylinder'].includes(kind)).map(([kind,s])=>`<button data-add-shape="${kind}" title="${s.name}" aria-label="${s.name}"><img src="./shapes/${kind}.png" alt="" width="128" height="96" draggable="false">${s.name}</button>`).join('');
+$('#shape-library').innerHTML=['box','cylinder',...Object.keys(SHAPES).filter(kind=>!['box','cylinder'].includes(kind))].map(kind=>{const s=SHAPES[kind];return `<button ${['box','cylinder'].includes(kind)?`id="add-${kind}"`:''} data-add-shape="${kind}" title="${s.name}" aria-label="${s.name}"><img src="./shapes/${kind}.png" alt="" width="128" height="96" draggable="false">${s.name}</button>`;}).join('');
 $('#plane-sketch').onclick=()=>startPlaneSketch();
 $('#undo').onclick=undo;$('#redo').onclick=redo;$('#fit-view').onclick=()=>fitView();
 $('#save-project').onclick=saveProject;$('#open-project').onclick=()=>$('#project-file').click();
@@ -867,7 +907,7 @@ document.addEventListener('keydown',event=>{
  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'){event.preventDefault();event.shiftKey?redo():undo();return;}
  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='y'){event.preventDefault();redo();return;}
  if((event.ctrlKey||event.metaKey)&&!sketch&&['c','x','v'].includes(event.key.toLowerCase())){event.preventDefault();event.key.toLowerCase()==='v'?pasteClipboard():copyBodies(event.key.toLowerCase()==='x');return;}
- if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='a'&&!sketch){event.preventDefault();selectedBodies=new Set(project.objects.filter(o=>o.visible!==false).map(o=>o.id));selectedId=[...selectedBodies][0]??null;selectedFace=null;renderBodies();renderPanels();return;}
+ if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='a'&&!sketch){event.preventDefault();selectedBodies=new Set(project.objects.filter(o=>o.visible!==false).map(o=>o.id));selectedId=[...selectedBodies][0]??null;selectedFace=null;selectedFaces.clear();renderBodies();renderPanels();return;}
  if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='d'){event.preventDefault();duplicateSelected();return;}
  if(event.key.toLowerCase()==='f')fitView();
  if(event.key.toLowerCase()==='v')setTool('select');
@@ -908,13 +948,13 @@ if(import.meta.env.PROD&&'serviceWorker' in navigator){
 }
 
 function sessionState(){
- return {projectId:activeProjectId,revision:projectRevision,project:clone(project),selection:{bodyId:selectedId,bodyIds:[...selectedBodies],face:selectedFace,edges:[...selectedEdges]},geometry:models.map(({mesh,...model})=>model)};
+ return {projectId:activeProjectId,revision:projectRevision,project:clone(project),selection:{bodyId:selectedId,bodyIds:[...selectedBodies],face:selectedFace,faces:[...selectedFaces.values()],edges:[...selectedEdges]},geometry:models.map(({mesh,...model})=>model)};
 }
 setupSession({
  list:()=>library.list(),
  state:()=>{if(!sessionReady)throw new Error('Anwendung noch nicht bereit.');return sessionState();},
  async action(method,args){
-  if(!sessionReady||busy||sketch||drag||transformStart||inspectorDirty||document.querySelector('#generator-dialog[open],#region-dialog[open]')||document.activeElement?.matches('#inspector input, #inspector select, #project-name'))throw new Error('Browser ist beschäftigt oder Eingaben sind noch nicht übernommen. Bitte den aktuellen Schritt zuerst übernehmen oder abbrechen.');
+  if(!sessionReady||busy||sketch||drag||transformStart||inspectorDirty||document.querySelector('#generator-dialog[open],#region-dialog[open],#engineering-dialog[open]')||document.activeElement?.matches('#inspector input, #inspector select, #project-name'))throw new Error('Browser ist beschäftigt oder Eingaben sind noch nicht übernommen. Bitte den aktuellen Schritt zuerst übernehmen oder abbrechen.');
   if(args.projectId!==activeProjectId||args.revision!==projectRevision)throw new Error('Projekt oder Revision hat sich geändert. Erst formraum_get_project erneut lesen.');
   const stored=library.read(activeProjectId);
   if(!stored||stored.revision!==projectRevision)throw new Error('Projekt wurde in einem anderen Tab geändert. Bitte zuerst im Browser neu öffnen.');
@@ -966,7 +1006,7 @@ function finishMarquee(event){
   const corners=[];for(let i=0;i<8;i++)corners.push(vec([0,1,2].map(j=>m.bounds[i&(1<<j)?'max':'min'][j])).project(camera));
   if(corners.every(p=>{const px=rect.x+(p.x+1)*rect.width/2,py=rect.y+(1-p.y)*rect.height/2;return p.z>=-1&&p.z<=1&&px>=min[0]&&px<=max[0]&&py>=min[1]&&py<=max[1];}))ids.add(m.id);
  }
- selectedBodies=ids;selectedId=ids.has(selectedId)?selectedId:[...ids][0]??null;selectedFace=null;selectedFeature=-1;renderBodies();renderPanels();
+ selectedBodies=ids;selectedId=ids.has(selectedId)?selectedId:[...ids][0]??null;selectedFace=null;selectedFaces.clear();selectedFeature=-1;renderBodies();renderPanels();
 }
 async function copyBodies(cut=false){
  if(busy||sketch||!selectedBodies.size)return;
@@ -1068,7 +1108,7 @@ async function measureSelectedBodies(){
 }
 
 function bodyParameterFields(spec){
- if(spec.kind==='region')return `<button class="primary" data-open-region-sketch="${esc(spec.sketchId)}" data-region-body="${esc(spec.id)}">Freie Skizze und Flächenauswahl bearbeiten</button><p class="tip">${spec.regions.length} gewählte Bereiche · ${fmt(spec.params.revolveAngle)}° Rotation. Linien, Kreise und Drehachse bleiben bearbeitbar.</p>`;
+ if(spec.kind==='region')return `<button class="primary" data-open-region-sketch="${esc(spec.sketchId)}" data-region-body="${esc(spec.id)}">Freie Skizze und Flächenauswahl bearbeiten</button><p class="tip">${spec.regions.length} gewählte Bereiche · ${spec.operation==='extrude'?fmt(spec.params.height)+' mm Aufbau':fmt(spec.params.revolveAngle)+'° Rotation'}. Linien, Kreise und Drehachse bleiben bearbeitbar.</p>`;
  if(spec.kind==='mirror')return `<div class="section-title">SPIEGELUNG</div>${axisSelect('data-mirror-axis',spec.axis)}${field('Position der Spiegelebene','mirror-offset',spec.offset)}<p class="tip">Unabhängige Spiegelkopie von ${esc(spec.source.name||'Körper')}. Die Ebene bezieht sich auf die gespeicherte Ausgangsgeometrie.</p>${(SHAPES[spec.source.kind]?.fields||[]).map(([key,label])=>parameterField(spec.source,'Quelle · '+label,key,'mirror-source-'+key)).join('')}`;
  if(SHAPES[spec.kind])return '<div class="section-title">MASSE DES GRUNDKÖRPERS</div>'+SHAPES[spec.kind].fields.map(([key,label])=>parameterField(spec,label,key,key)).join('');
  if(spec.kind==='boolean')return `<div class="section-title">AUSGANGSFORMEN · ${esc(({union:'Vereint',cut:'Ausgeschnitten',intersect:'Schnittmenge',hull:'Konvexe Hülle'})[spec.operation])}</div>`+spec.operands.map((o,i)=>`<details class="operand-editor"><summary>${esc(o.name||shapeName(o.kind))}</summary>${(SHAPES[o.kind]?.fields||[]).map(([key,label])=>parameterField(o,label,key,'operand-'+i+'-'+key)).join('')}<div class="fields-3">${['x','y','z'].map((axis,n)=>field(axis.toUpperCase(),'operand-'+i+'-'+axis,o.position?.[n]||0)).join('')}</div></details>`).join('');
@@ -1239,4 +1279,58 @@ function contourPoints(p){
 function profileSelector(profiles){
  const index=Math.min(selectedContour,profiles.length-1);selectedContour=index;
  return `<label class="field"><span>Kontur bearbeiten</span><select data-profile-select aria-label="Kontur bearbeiten">${profiles.map((p,i)=>`<option value="${i}" ${i===index?'selected':''}>${i+1}. ${sketchName(p.kind)}${p.role==='hole'?' · Aussparung':''}</option>`).join('')}</select></label><label class="field"><span>Konturrolle</span><select data-field="profile-role" aria-label="Konturrolle"><option value="solid" ${profiles[index].role!=='hole'?'selected':''}>Normale Kontur</option><option value="hole" ${profiles[index].role==='hole'?'selected':''}>Aussparung</option></select></label>`;
+}
+
+
+function openGrip(){
+ if(busy||sketch||inspectorDirty){toast('Bitte die laufende Bearbeitung zuerst übernehmen oder abbrechen.');return;}
+ setTool('grip');
+ const existing=currentSpec()?.features?.findIndex(f=>f.type==='grip')??-1;
+ if(existing>=0){tool='select';selectedFeature=existing;renderPanels();renderSelection();updateToolButtons();}
+}
+function gripDefaults(){
+ const r=currentSpec()?.params?.radius??12;
+ return {count:16,radius:Math.round(Math.min(1.5,r*.1)*100)/100,depth:Math.round(Math.min(1.5,r*.1)*100)/100,angle:0,outerRadius:0};
+}
+function renderGripInspector(feature=null){
+ const spec=currentSpec(),scale=spec?.scale??1,p=feature?.params??gripDefaults(),edit=!!feature;
+ $('#inspector').innerHTML=`<div class="inspector-heading">GRIFFMULDEN${icon('grip')}</div><div class="inspector-content"><p class="tool-description">Halbrunde Nuten machen Drehknöpfe und Ringe griffig. Wähle einen runden Körper; die Nuten laufen längs seiner lokalen Z-Achse durch die gesamte Höhe.</p>${!spec||selectedBodies.size!==1?'<p class="tip">Bitte genau einen Körper auswählen, zum Beispiel einen Zylinder.</p>':`<div class="grip-presets" role="group" aria-label="Griffstruktur auswählen"><button data-grip-preset="fine">Fein</button><button data-grip-preset="standard">Standard</button><button data-grip-preset="coarse">Grob</button></div>${field('Anzahl der Mulden','grip-count',p.count,'','min="3" max="64" step="1"')}${field('Muldenradius','grip-radius',p.radius*scale)}<label class="locked-dimension"><input id="grip-half-round" type="checkbox" ${Math.abs(p.radius-p.depth)<1e-7?'checked':''}> Halbrunde Ausschnitte</label>${field('Einschnitttiefe','grip-depth',p.depth*scale)}<p class="tip">Tiefe = Muldenradius ergibt halbrunde Ausschnitte. Eine kleinere Tiefe ergibt flachere Mulden.</p><details class="grip-options"><summary>Position &amp; Umfang</summary>${field('Winkelversatz','grip-angle',p.angle??0,'°')}${field('Umfangsradius · 0 = automatisch','grip-outerRadius',(p.outerRadius??0)*scale)}<p class="tip">Automatisch mittig um die lokale Z-Achse der Bauteilbegrenzung. Bei gestuften Drehteilen kann der Umfangsradius vorgegeben werden.</p></details><button class="primary" data-action="${edit?'apply-feature':'apply-grip'}" ${spec.locked?'disabled':''}>${icon('check')}${edit?'Änderung übernehmen':'Griffmulden ausschneiden'}</button>${spec.locked?'<p class="tip">Körper zuerst entsperren.</p>':''}${edit?`<button class="subtle-button" data-action="bind-measures">Maße mit Variablen verknüpfen</button><button class="subtle-button" data-action="suppress-feature">${feature.suppressed?'Aktivieren':'Unterdrücken'}</button>`:''}`}<button class="subtle-button" data-action="${edit?'show-body':'cancel-tool'}">${edit?'Zurück zum Körper':'Abbrechen'}</button><p class="tip">Nach dem Anwenden unter „Modellschritte → Griffmulden“ jederzeit ändern. Strg Z macht den Schritt rückgängig.</p></div>`;
+ const halfRound=$('#grip-half-round'),radiusInput=$('[data-field="grip-radius"]'),depthInput=$('[data-field="grip-depth"]');
+ const syncHalfRound=()=>{if(!halfRound)return;depthInput.disabled=halfRound.checked;if(halfRound.checked)depthInput.value=radiusInput.value;};
+ if(halfRound){halfRound.onchange=syncHalfRound;radiusInput.addEventListener('input',syncHalfRound);syncHalfRound();}
+ for(const button of $$('[data-grip-preset]'))button.onclick=()=>{const defaults=gripDefaults(),preset={fine:[32,.45],standard:[16,1],coarse:[10,1.6]}[button.dataset.gripPreset];$('[data-field="grip-count"]').value=preset[0];for(const key of ['radius','depth'])$(`[data-field="grip-${key}"]`).value=Number((defaults.radius*preset[1]*scale).toFixed(3));halfRound.checked=true;syncHalfRound();inspectorDirty=true;};
+}
+function readGripParameters(){
+ const scale=currentSpec()?.scale??1;
+ return Object.fromEntries(['count','radius','depth','angle','outerRadius'].map(key=>[key,inputNumber('grip-'+key)/(['radius','depth','outerRadius'].includes(key)?scale:1)]));
+}
+async function applyGrip(){
+ if(busy||!currentSpec()||selectedBodies.size!==1||!allowNewFeature())return;
+ try{const next=clone(project),spec=next.objects.find(o=>o.id===selectedId);spec.features.push({type:'grip',params:readGripParameters()});if(await commit(next,{message:'Griffmulden erstellt · im Modellverlauf änderbar'}))setTool('select');}catch(error){toast(error.message,true);}
+}
+
+
+function openTexture(mode){
+ if(busy||sketch||inspectorDirty){toast('Bitte die laufende Bearbeitung zuerst übernehmen oder abbrechen.');return;}
+ textureMode=mode;setTool('texture');
+}
+function renderTextureInspector(feature=null){
+ const edit=!!feature,scale=edit?(currentSpec()?.scale??1):1,p=feature?.params??{mode:textureMode,count:12,radius:textureMode==='knurl'?.5:1,depth:textureMode==='knurl'?.4:1,angle:textureMode==='knurl'?45:0},count=edit?feature.targets.length:selectedFaces.size;
+ const title=p.mode==='knurl'?'KREUZRÄNDEL':'GRIFFMULDEN AUF FLÄCHEN';
+ $('#inspector').innerHTML=`<div class="inspector-heading">${title}${icon('grip')}</div><div class="inspector-content"><p class="tool-description">${p.mode==='knurl'?'Zwei schräge Nutrichtungen bilden ein griffiges Kreuzmuster.':'Regelmäßige runde Nuten folgen der gewählten Oberfläche.'} Die Bearbeitung bleibt auf die gewählten Flächen und die eingestellte Tiefe begrenzt.</p><div class="edge-count"><strong>${count}</strong> ${count===1?'Fläche':'Flächen'} ${edit?'im Modellschritt':'ausgewählt'}</div>${!edit?'<p class="tip">Fläche anklicken. Mit <b>Strg + Klick</b> weitere Flächen hinzufügen oder abwählen – auch an anderen Körpern.</p>':''}${count?`<div class="grip-presets"><button data-texture-preset="fine">Fein</button><button data-texture-preset="standard">Standard</button><button data-texture-preset="coarse">Grob</button></div>${field('Teilung · Anzahl','texture-count',p.count,'','min="2" max="48" step="1"')}${field('Nutradius','texture-radius',p.radius*scale)}<label class="locked-dimension"><input id="texture-half-round" type="checkbox" ${Math.abs(p.radius-p.depth)<1e-7?'checked':''}> Halbrunde Nuten</label>${field('Einschnitttiefe','texture-depth',p.depth*scale)}${field(p.mode==='knurl'?'Kreuzwinkel ±':'Richtung auf der Fläche','texture-angle',p.angle,'°')}<input id="texture-mode" type="hidden" value="${p.mode}"><p class="tip">Maße in mm am sichtbaren Körper. Die Richtung folgt den Flächenkoordinaten. Große Anzahlen benötigen mehr Rechenzeit.</p><button class="primary" data-action="${edit?'apply-feature':'apply-texture'}">${icon('check')}${edit?'Änderung übernehmen':p.mode==='knurl'?'Rändel ausschneiden':'Griffmulden ausschneiden'}</button>${edit?`<button class="subtle-button" data-action="bind-measures">Maße mit Variablen verknüpfen</button><button class="subtle-button" data-action="suppress-feature">${feature.suppressed?'Aktivieren':'Unterdrücken'}</button>`:''}`:'<p class="tip">Es wird kein ganzer Körper automatisch bearbeitet. Bitte zuerst mindestens eine Fläche wählen.</p>'}<button class="subtle-button" data-action="${edit?'show-body':'cancel-tool'}">${edit?'Zurück zum Körper':'Abbrechen'}</button><p class="tip">Später unter „Modellschritte“ änderbar. Strg Z macht die Bearbeitung rückgängig.</p></div>`;
+ const half=$('#texture-half-round'),r=$('[data-field="texture-radius"]'),d=$('[data-field="texture-depth"]');
+ const sync=()=>{if(half){d.disabled=half.checked;if(half.checked)d.value=r.value;}};
+ if(half){half.onchange=sync;r.oninput=sync;sync();}
+ for(const button of $$('[data-texture-preset]'))button.onclick=()=>{const knurl=p.mode==='knurl',preset=({fine:knurl?[20,.3,.25]:[18,.5,.5],standard:knurl?[12,.5,.4]:[12,1,1],coarse:knurl?[6,.8,.6]:[6,1.5,1.5]})[button.dataset.texturePreset];$('[data-field="texture-count"]').value=preset[0];r.value=preset[1]*scale;d.value=preset[2]*scale;half.checked=preset[1]===preset[2];sync();inspectorDirty=true;};
+}
+function readTextureParameters(scale=1){return {mode:$('#texture-mode').value,count:inputNumber('texture-count'),radius:inputNumber('texture-radius')/scale,depth:inputNumber('texture-depth')/scale,angle:inputNumber('texture-angle')};}
+async function applyTexture(){
+ if(busy||!selectedFaces.size)return;
+ try{
+  if(selectedFaces.size>8)throw Error('Bitte höchstens acht Flächen auf einmal auswählen.');
+  const next=clone(project),byBody=new Map();
+  for(const selection of selectedFaces.values()){if(!byBody.has(selection.bodyId))byBody.set(selection.bodyId,[]);byBody.get(selection.bodyId).push({face:selection.face.id,reference:clone(selection.face.reference)});}
+  for(const [bodyId,targets]of byBody){const spec=next.objects.find(o=>o.id===bodyId);if(spec.rollback!=null)throw Error('Zuerst alle Modellschritte wiederherstellen.');spec.features.push({type:'surfaceTexture',targets,params:readTextureParameters(spec.scale??1)});}
+  if(await commit(next,{message:textureMode==='knurl'?'Kreuzrändel auf ausgewählten Flächen erstellt':'Griffmulden auf ausgewählten Flächen erstellt'}))setTool('select');
+ }catch(error){toast(error.message,true);}
 }

@@ -1,6 +1,7 @@
 // A body lock protects modelling data, while visibility and unlocking remain available.
 export function assertUnlockedChanges(before,after,{resolved=false}={}){
- const geometry=(body,project)=>{const {visible,locked,...data}=body;const ids=new Set();const visit=o=>{if(o.sketchId)ids.add(o.sketchId);if(o.source)visit(o.source);for(const child of o.operands??[])visit(child);};visit(body);return JSON.stringify([data,[...ids].map(id=>project.sketches?.find(s=>s.id===id))]);};
+ if(!resolved&&JSON.stringify(before.assembly??null)===JSON.stringify(after.assembly??null)){for(const joint of before.assembly?.joints??[]){const a=before.objects.find(o=>o.id===joint.childId),b=after.objects.find(o=>o.id===joint.childId);if(!a||!b)continue;const pose=o=>[...(o.position??[0,0,0]),...(o.rotation??[0,0,0]),o.scale??1];if(pose(a).some((v,i)=>Math.abs(v-pose(b)[i])>1e-8))throw new Error('Dieses Teil wird durch eine Baugruppenverbindung geführt. Position unter Baugruppen & Bewegung ändern oder die Verbindung lösen.');}}
+ const geometry=(body,project)=>{const {visible,locked,...data}=body;const ids=new Set();const visit=o=>{if(o.sketchId)ids.add(o.sketchId);for(const f of o.features??[])if(f.sketchId)ids.add(f.sketchId);if(o.source)visit(o.source);for(const child of o.operands??[])visit(child);};visit(body);return JSON.stringify([data,[...ids].map(id=>project.sketches?.find(s=>s.id===id))]);};
  for(const old of before.objects.filter(o=>o.locked)){
   if(old.generated){
    if(resolved||!(after.generators??[]).some(g=>g.id===old.generated.generatorId))continue;
@@ -13,7 +14,7 @@ export function assertUnlockedChanges(before,after,{resolved=false}={}){
  }
 }
 export function referencedSketches(project,bodies){
- const ids=new Set();const visit=o=>{if(o.sketchId)ids.add(o.sketchId);if(o.source)visit(o.source);for(const child of o.operands??[])visit(child);};bodies.forEach(visit);
+ const ids=new Set();const visit=o=>{if(o.sketchId)ids.add(o.sketchId);for(const f of o.features??[])if(f.sketchId)ids.add(f.sketchId);if(o.source)visit(o.source);for(const child of o.operands??[])visit(child);};bodies.forEach(visit);
  return structuredClone((project.sketches??[]).filter(s=>ids.has(s.id)));
 }
 export function pasteBodies(project,bodies,offset=5,newId=()=>crypto.randomUUID(),sourceSketches=[]){
@@ -23,6 +24,6 @@ export function pasteBodies(project,bodies,offset=5,newId=()=>crypto.randomUUID(
  copies.forEach(o=>delete o.generated);
  const next={...structuredClone(project),objects:[...structuredClone(project.objects),...copies]},remap=new Map();
  if(sourceSketches.length){next.sketches??=[];for(const source of referencedSketches({sketches:sourceSketches},copies)){const existing=next.sketches.find(s=>s.id===source.id);if(existing&&JSON.stringify(existing)===JSON.stringify(source))continue;const previous=source.id;if(existing){source.id=newId();remap.set(previous,source.id);}next.sketches.push(source);}}
- const update=o=>{if(remap.has(o.sketchId))o.sketchId=remap.get(o.sketchId);if(o.source)update(o.source);for(const child of o.operands??[])update(child);};copies.forEach(update);
+ const update=o=>{if(remap.has(o.sketchId))o.sketchId=remap.get(o.sketchId);for(const f of o.features??[])if(remap.has(f.sketchId))f.sketchId=remap.get(f.sketchId);if(o.source)update(o.source);for(const child of o.operands??[])update(child);};copies.forEach(update);
  return {project:next,ids:copies.map(o=>o.id)};
 }
